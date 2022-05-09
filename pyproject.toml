@@ -1,0 +1,108 @@
+[tool]
+[tool.poetry]
+authors = ["Leon Sixt <github@leon-sixt.de>"]
+classifiers = [
+  'Development Status :: 2 - Pre-Alpha',
+  'Intended Audience :: Developers',
+  'License :: OSI Approved :: MIT License',
+  'Programming Language :: Python :: 3.9',
+  'Programming Language :: Python :: 3.10',
+]
+description = "Apply the sanity checks to relation networks."
+homepage = "https://github.com/berleon/sanity_checks_for_relation_networks"
+license = "MIT"
+name = "sanity_checks_for_relation_networks"
+packages = [
+  {include = "sanity_checks_for_relation_networks"},
+  {include = "tests", format = "sdist"},
+]
+readme = "README.md"
+version = "0.1.0"
+
+[tool.poetry.dependencies]
+python = ">=3.9,<4.0"
+
+black = "^22.3.0"
+bump2version = {version = "^1.0.1", optional = true}
+flake8 = {version = "^3.9.2", optional = true}
+flake8-docstrings = {version = "^1.6.0", optional = true}
+isort = {version = "^5.8.0", optional = true}
+mkdocs = {version = "^1.1.2", optional = true}
+mkdocs-autorefs = {version = "^0.2.1", optional = true}
+mkdocs-include-markdown-plugin = {version = "^1.0.0", optional = true}
+mkdocs-material = {version = "^6.1.7", optional = true}
+mkdocs-material-extensions = {version = "^1.0.1", optional = true}
+mkdocstrings = {version = "^0.15.2", optional = true}
+mypy = {version = "^0.900", optional = true}
+pip = {version = "^20.3.1", optional = true}
+pre-commit = {version = "^2.12.0", optional = true}
+pytest = {version = "^6.2.4", optional = true}
+pytest-cov = {version = "^2.12.0", optional = true}
+toml = {version = "^0.10.2", optional = true}
+tox = {version = "^3.20.1", optional = true}
+twine = {version = "^3.3.0", optional = true}
+virtualenv = {version = "^20.2.2", optional = true}
+
+matplotlib = {version = "^3.2.1", optional = true}
+numpy = {version = "^1.18.1", optional = true}
+pandas = {version = "^1.0.1", optional = true}
+savethat = {git = "https://github.com/berleon/savethat", branch = "main"}
+scikit-learn = {version = "^0.22.1", optional = true}
+
+[tool.poetry.extras]
+test = [
+  "pytest",
+  "black",
+  "isort",
+  "mypy",
+  "flake8",
+  "flake8-docstrings",
+  "pytest-cov",
+]
+
+dev = ["tox", "pre-commit", "virtualenv", "pip", "twine", "toml", "bump2version", "python-language-server[all]"]
+
+doc = [
+  "mkdocs",
+  "mkdocs-include-markdown-plugin",
+  "mkdocs-material",
+  "mkdocstrings",
+  "mkdocs-material-extension",
+  "mkdocs-autorefs",
+]
+
+[tool.black]
+exclude = '''
+/(
+    \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+  | relation_network
+)/
+'''
+include = '\.pyi?$'
+line-length = 80
+skip-string-normalization = false
+target-version = ['py39']
+
+[tool.isort]
+ensure_newline_before_comments = true
+force_grid_wrap = 0
+include_trailing_comma = true
+line_length = 80
+multi_line_output = 3
+skip_gitignore = true
+use_parentheses = true
+# you can skip files as below
+#skip_glob = docs/conf.py
+
+[build-system]
+build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=1.0.0"]
