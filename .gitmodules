@@ -1,3 +1,0 @@
-[submodule "relation_network"]
-	path = relation_network
-	url = git@github.com:berleon/Relation-Network-PyTorch.git
