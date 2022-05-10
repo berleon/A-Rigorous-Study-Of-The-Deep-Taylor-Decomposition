@@ -15,6 +15,7 @@ name = "sanity_checks_for_relation_networks"
 packages = [
   {include = "sanity_checks_for_relation_networks"},
   {include = "tests", format = "sdist"},
+  {include = "relation_network"},
 ]
 readme = "README.md"
 version = "0.1.0"
@@ -47,7 +48,11 @@ matplotlib = {version = "^3.2.1", optional = true}
 numpy = {version = "^1.18.1", optional = true}
 pandas = {version = "^1.0.1", optional = true}
 savethat = {git = "https://github.com/berleon/savethat", branch = "main"}
-scikit-learn = {version = "^0.22.1", optional = true}
+# scikit-learn = {version = "^0.22.1", optional = true}
+torch = "^1.11.0"
+torchvision = "^0.12.0"
+nltk = "^3.7"
+captum = "^0.5.0"
 
 [tool.poetry.extras]
 test = [

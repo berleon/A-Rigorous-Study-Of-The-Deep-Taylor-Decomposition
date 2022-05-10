@@ -25,3 +25,14 @@ clean:
 	rm -rf *.egg-info
 	rm -rf .tox dist site
 	rm -rf coverage.xml .coverage
+
+
+download_clevr:
+	mkdir -p ../data/clevr
+	cd ../data/clevr && \
+		wget https://dl.fbaipublicfiles.com/clevr/CLEVR_v1.0.zip && \
+		unzip CLEVR_v1.0.zip
+
+nltk:
+	# which python /srv/data/leonsixt/lrp_fails_the_sanity_check/venv/nltk_data
+	python -m nltk.downloader all -d "`dirname \`which python\``/../nltk_data"
