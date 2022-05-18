@@ -10,13 +10,11 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from lrp_relations import sanity_checks_for_relation_networks as relnets
 from relation_network.dataset import CLEVR, collate_data, transform
 from relation_network.model import RelationNetworks
-from sanity_checks_for_relation_networks import (
-    sanity_checks_for_relation_networks as relnets,
-)
 
-from sanity_checks_for_relation_networks import (  # noqa isort:skip
+from lrp_relations import (  # noqa isort:skip
     enable_determistic,
 )
 
@@ -26,7 +24,7 @@ def dataset_dir() -> Path:
     return Path(__file__).parent.parent.parent / "data" / "clevr" / "CLEVR_v1.0"
 
 
-def test_lrp_relnet_matches_output(dataset_dir: Path):
+def test_lrp_relnet_matches_output(dataset_dir: Path) -> None:
 
     with open(dataset_dir / "dic.pkl", "rb") as f:
         dic = pickle.load(f)

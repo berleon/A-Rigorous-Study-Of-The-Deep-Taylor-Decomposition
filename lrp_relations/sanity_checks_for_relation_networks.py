@@ -20,6 +20,7 @@ import itertools
 import pickle
 from copy import deepcopy
 from pathlib import Path
+from typing import Callable
 
 import captum.attr
 import pandas as pd
@@ -33,7 +34,7 @@ from tqdm import tqdm
 from relation_network.dataset import CLEVR, collate_data, transform
 from relation_network.model import RelationNetworks
 
-from sanity_checks_for_relation_networks import (  # noqa isort:skip
+from lrp_relations import (  # noqa isort:skip
     enable_determistic,
 )
 
@@ -57,15 +58,20 @@ class Concat(nn.Module):
 
 
 class ConcatRule(lrp_rules.EpsilonRule):
-    def __init__(self, dim=0) -> None:
+    def __init__(self, dim: int = 0) -> None:
         super().__init__(epsilon=1e-9)
         self.dim = dim
 
-    def forward_hook(self, module, inputs, outputs):
+    def forward_hook(
+        self,
+        module: nn.Module,
+        inputs: tuple[torch.Tensor, ...],
+        outputs: torch.Tensor,
+    ) -> torch.Tensor:
         def _create_backward_hook_input(
             input: torch.Tensor, start: int, end: int
-        ):
-            def _backward_hook_input(grad: torch.Tensor):
+        ) -> Callable[[torch.Tensor], None]:
+            def _backward_hook_input(grad: torch.Tensor) -> None:
                 rel = self.relevance_output[grad.device]
                 idx = [slice(None, None, None) for _ in range(grad.dim())]
                 idx[self.dim] = slice(start, end)
@@ -87,7 +93,7 @@ class ConcatRule(lrp_rules.EpsilonRule):
                 )
                 offset = next_offset
                 self._handle_input_hooks.append(input.register_hook(input_hook))
-                input.hook_registered = True
+                input.hook_registered = True  # type: ignore
         output_hook = self._create_backward_hook_output(outputs.data)
         self._handle_output_hook = outputs.register_hook(output_hook)
         return outputs.clone()
@@ -258,7 +264,7 @@ class SanityChecksForRelationNetworks(
 
             def get_normalized_lrp_saliency(
                 target: int, randomize_questions: bool = False
-            ):
+            ) -> torch.Tensor:
                 set_lrp_rules(lrp_relnet)
                 lrp = captum.attr.LRP(lrp_relnet)
 

@@ -1,4 +1,4 @@
-sources = sanity_checks_for_relation_networks
+sources = lrp_relations
 
 .PHONY: test format lint unittest coverage pre-commit clean
 test: format lint unittest
