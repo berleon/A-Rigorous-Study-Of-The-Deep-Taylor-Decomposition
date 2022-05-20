@@ -8,7 +8,7 @@ import savethat
 import torch
 from savethat import logger
 from torch import nn, optim
-from torch.optim.lr_scheduler import StepLR
+from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -28,10 +28,13 @@ class TrainArgs(savethat.Args):
     clip_norm: float = 50
     reverse_question: bool = True
     weight_decay: float = 1e-4
-    n_epoch: int = 500
+    n_epoch: int = 260
     n_worker: int = 9
     data_parallel: bool = True
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    decay_lr: bool = False
+    decay_lr_step: int = 20
+    decay_lr_gamma: float = 0.5
 
 
 def run_training(
@@ -133,6 +136,7 @@ def run_training(
         with open(ckpt_path / "log.jsonl", "a+") as w:
             info = {k: class_correct[k] / v for k, v in class_total.items()}
             info["epoch"] = epoch
+            info["lr"] = optimizer.param_groups[0]["lr"]
             print(json.dumps(info), file=w)
 
         acc = class_correct["total"] / class_total["total"]
@@ -166,9 +170,23 @@ def run_training(
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(
-        relnet.parameters(), lr=args.lr, weight_decay=args.weight_decay
+        relnet.parameters(), lr=args.lr_max, weight_decay=args.weight_decay
     )
-    scheduler = StepLR(optimizer, step_size=args.lr_step, gamma=args.lr_gamma)
+    scheduler: lr_scheduler._LRScheduler
+    if args.decay_lr:
+        warm_up = lr_scheduler.LinearLR(
+            optimizer, start_factor=args.lr / args.lr_max, total_iters=10
+        )
+        decay_scheduler = lr_scheduler.StepLR(
+            optimizer, step_size=args.decay_lr_step, gamma=args.decay_lr_gamma
+        )
+        scheduler = lr_scheduler.SequentialLR(
+            schedulers=[warm_up, decay_scheduler], milestones=[100]
+        )
+    else:
+        scheduler = lr_scheduler.StepLR(
+            optimizer, step_size=args.lr_step, gamma=args.lr_gamma
+        )
 
     ckpts: dict[Path, float] = {}
 
@@ -177,10 +195,12 @@ def run_training(
 
     try:
         for epoch in range(args.n_epoch):
-            if scheduler.get_lr()[0] < args.lr_max:  # type: ignore
-                scheduler.step()
-
             train(epoch)
+            scheduler.step()
+
+            if scheduler.get_last_lr() < args.lr_max:  # type: ignore
+                optimizer.param_groups[0]["lr"] = args.lr_max
+
             acc = valid(epoch)
             checkpoint(acc)
             tidy_checkpoints(ckpts)
