@@ -12,6 +12,7 @@ from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from lrp_relations import sequential_lr_fix
 from relation_network.dataset import CLEVR, collate_data, transform
 from relation_network.model import RelationNetworks
 
@@ -47,7 +48,7 @@ class Checkpoint:
 
 def run_training(
     data_root: Path, ckpt_dir: Path, args: TrainArgs
-) -> dict[int, Checkpoint]:
+) -> list[Checkpoint]:
     device = torch.device(args.device)
 
     def train(epoch):
@@ -191,12 +192,13 @@ def run_training(
         decay_scheduler = lr_scheduler.StepLR(
             optimizer, step_size=args.decay_lr_step, gamma=args.decay_lr_gamma
         )
-        scheduler = lr_scheduler.SequentialLR(  # type: ignore
+        scheduler = sequential_lr_fix.SequentialLR(
             optimizer=optimizer,
             schedulers=[warm_up, decay_scheduler],
             milestones=[100],
         )
     else:
+        optimizer.param_groups[0]["lr"] = args.lr
         scheduler = lr_scheduler.StepLR(
             optimizer, step_size=args.lr_step, gamma=args.lr_gamma
         )
@@ -213,8 +215,7 @@ def run_training(
         for epoch in range(1, args.n_epoch + 1):
             train(epoch)
             scheduler.step()
-
-            if scheduler.get_lr()[0] > args.lr_max:  # type: ignore
+            if scheduler.get_last_lr()[0] > args.lr_max:  # type: ignore
                 optimizer.param_groups[0]["lr"] = args.lr_max
 
             acc = valid(epoch)
@@ -223,7 +224,7 @@ def run_training(
     except Exception as e:
         logger.error(e)
     finally:
-        return ckpts
+        return sorted(ckpts.values(), key=lambda x: x.accuracy)
 
 
 @dataclasses.dataclass
@@ -239,7 +240,7 @@ class Train(savethat.Node[TrainArgs, TrainedModel]):
             ckpts = run_training(
                 Path(self.args.data_root), checkpoints, self.args
             )
-        finally:
-            return TrainedModel(
-                sorted(ckpts.values(), key=lambda x: x.accuracy)
-            )
+        except KeyboardInterrupt:
+            return TrainedModel(ckpts)
+
+        return TrainedModel(ckpts)
