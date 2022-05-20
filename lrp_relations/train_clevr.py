@@ -184,7 +184,8 @@ def run_training(
             acc = valid(epoch)
             checkpoint(acc)
             tidy_checkpoints(ckpts)
-
+    except Exception as e:
+        logger.error(e)
     finally:
         return ckpts
 
