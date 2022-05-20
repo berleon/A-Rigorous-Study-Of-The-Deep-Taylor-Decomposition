@@ -75,10 +75,11 @@ def load_model(
     if checkpoint == "best":
         with open(storage / key / "results.pickle", "rb") as f:
             results = cast(train_clevr.TrainedModel, pickle.load(f))
-        ckpt_path, acc = sorted(
-            results.checkpoints.items(), key=lambda x: x[1]
-        )[-1]
-        logger.debug(f"Loading model with accuracy {acc:.4f} from {ckpt_path}")
+        ckpt = results.checkpoints[-1]
+        ckpt_path = storage / key / "checkpoints" / ckpt.path
+        logger.debug(
+            f"Loading model with accuracy {ckpt.accuracy:.4f} from {ckpt_path}"
+        )
     else:
         ckpt_path = storage / key / "checkpoints" / checkpoint
         logger.debug(f"Loading model from {ckpt_path}")

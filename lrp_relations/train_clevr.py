@@ -37,9 +37,17 @@ class TrainArgs(savethat.Args):
     decay_lr_gamma: float = 0.5
 
 
+@dataclasses.dataclass
+class Checkpoint:
+    path: Path
+    accuracy: float
+    epoch: int
+    keep: bool
+
+
 def run_training(
-    data_root: Path, ckpt_path: Path, args: TrainArgs
-) -> dict[Path, float]:
+    data_root: Path, ckpt_dir: Path, args: TrainArgs
+) -> dict[int, Checkpoint]:
     device = torch.device(args.device)
 
     def train(epoch):
@@ -89,7 +97,7 @@ def run_training(
 
             pbar.set_description(
                 "Epoch: {}; Loss: {:.5f}; Acc: {:.5f}; LR: {:.6f}".format(
-                    epoch + 1,
+                    epoch,
                     loss.detach().item(),
                     moving_loss,
                     optimizer.param_groups[0]["lr"],
@@ -133,7 +141,7 @@ def run_training(
         class_correct["total"] = sum(class_correct.values())
         class_total["total"] = sum(class_total.values())
 
-        with open(ckpt_path / "log.jsonl", "a+") as w:
+        with open(ckpt_dir / "log.jsonl", "a+") as w:
             info = {k: class_correct[k] / v for k, v in class_total.items()}
             info["epoch"] = epoch
             info["lr"] = optimizer.param_groups[0]["lr"]
@@ -143,17 +151,20 @@ def run_training(
         print("Avg Acc: {:.5f}".format(acc))
         return acc
 
-    def tidy_checkpoints(ckpts: dict[Path, float]) -> None:
-        ckpts_sorted = sorted(ckpts.items(), key=lambda x: x[1])
-        for ckpt, acc in ckpts_sorted[:-3]:
-            if ckpt.exists():
-                logger.debug(f"Removing {ckpt} with acc {acc}")
-                ckpt.unlink()
-            del ckpts[ckpt]
+    def tidy_checkpoints(ckpts: dict[int, Checkpoint]) -> None:
+        ckpts_sorted = sorted(ckpts.items(), key=lambda x: x[1].accuracy)
+        for epoch, ckpt in ckpts_sorted[:-3]:
+            ckpt_path = ckpt_dir / ckpt.path
+            if ckpt_path.exists() and not ckpt.keep:
+                logger.debug(f"Removing {ckpt} with acc {ckpt.accuracy}")
+                ckpt_path.unlink()
+                del ckpts[epoch]
 
     def checkpoint(acc: float) -> None:
-        ckpt_filename = ckpt_path / f"checkpoint_{str(epoch).zfill(3)}.model"
-        ckpts[ckpt_filename] = acc
+        ckpt_filename = Path(f"checkpoint_{str(epoch).zfill(3)}.model")
+        ckpts[epoch] = Checkpoint(
+            ckpt_filename, acc, epoch, keep=epoch % 10 == 0
+        )
         logger.debug(f"Saving checkpoint to {ckpt_filename} with acc: {acc}")
         with open(ckpt_filename, "wb") as fb:
             torch.save(relnet.state_dict(), fb)
@@ -180,25 +191,30 @@ def run_training(
         decay_scheduler = lr_scheduler.StepLR(
             optimizer, step_size=args.decay_lr_step, gamma=args.decay_lr_gamma
         )
-        scheduler = lr_scheduler.SequentialLR(
-            schedulers=[warm_up, decay_scheduler], milestones=[100]
+        scheduler = lr_scheduler.SequentialLR(  # type: ignore
+            optimizer=optimizer,
+            schedulers=[warm_up, decay_scheduler],
+            milestones=[100],
         )
     else:
         scheduler = lr_scheduler.StepLR(
             optimizer, step_size=args.lr_step, gamma=args.lr_gamma
         )
 
-    ckpts: dict[Path, float] = {}
+    acc = valid(0)
+    ckpts: dict[int, Checkpoint] = {
+        0: Checkpoint(Path("initial_weights.model"), acc, 0, keep=True)
+    }
 
-    with open(ckpt_path / "initial_weights.model", "wb") as fb:
+    with open(ckpt_dir / "initial_weights.model", "wb") as fb:
         torch.save(relnet.state_dict(), fb)
 
     try:
-        for epoch in range(args.n_epoch):
+        for epoch in range(1, args.n_epoch + 1):
             train(epoch)
             scheduler.step()
 
-            if scheduler.get_last_lr() < args.lr_max:  # type: ignore
+            if scheduler.get_lr()[0] > args.lr_max:  # type: ignore
                 optimizer.param_groups[0]["lr"] = args.lr_max
 
             acc = valid(epoch)
@@ -212,18 +228,18 @@ def run_training(
 
 @dataclasses.dataclass
 class TrainedModel:
-    checkpoints: dict[Path, float]
+    checkpoints: list[Checkpoint]
 
 
 class Train(savethat.Node[TrainArgs, TrainedModel]):
     def _run(self):
         checkpoints = self.output_dir / "checkpoints"
         checkpoints.mkdir()
-
-        ckpts = run_training(Path(self.args.data_root), checkpoints, self.args)
-
-        ckpts_rel = {
-            ckpt.relative_to(checkpoints): acc for ckpt, acc in ckpts.items()
-        }
-
-        return TrainedModel(ckpts_rel)
+        try:
+            ckpts = run_training(
+                Path(self.args.data_root), checkpoints, self.args
+            )
+        finally:
+            return TrainedModel(
+                sorted(ckpts.values(), key=lambda x: x.accuracy)
+            )
