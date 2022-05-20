@@ -32,7 +32,7 @@ class TrainArgs(savethat.Args):
     n_worker: int = 9
     data_parallel: bool = True
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    decay_lr: bool = False
+    warmup_and_decay: bool = False
     decay_lr_step: int = 20
     decay_lr_gamma: float = 0.5
 
@@ -173,7 +173,7 @@ def run_training(
         relnet.parameters(), lr=args.lr_max, weight_decay=args.weight_decay
     )
     scheduler: lr_scheduler._LRScheduler
-    if args.decay_lr:
+    if args.warmup_and_decay:
         warm_up = lr_scheduler.LinearLR(
             optimizer, start_factor=args.lr / args.lr_max, total_iters=10
         )
