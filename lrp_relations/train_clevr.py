@@ -30,7 +30,7 @@ class TrainArgs(savethat.Args):
     weight_decay: float = 1e-4
     n_epoch: int = 260
     n_worker: int = 9
-    data_parallel: bool = True
+    data_parallel: bool = False
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     warmup_and_decay: bool = False
     decay_lr_step: int = 20
