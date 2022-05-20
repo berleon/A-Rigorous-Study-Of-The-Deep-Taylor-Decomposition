@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """Tests for `sanity_checks_for_relation_networks` package."""
 
+from lrp_relations import enable_deterministic, utils  # noqa isort:skip
+
 import pickle
 from pathlib import Path
 from typing import Callable
@@ -14,14 +16,10 @@ from lrp_relations import lrp
 from relation_network.dataset import CLEVR, collate_data, transform
 from relation_network.model import RelationNetworks
 
-from lrp_relations import (  # noqa isort:skip
-    enable_determistic,
-)
-
 
 @pytest.fixture
 def dataset_dir() -> Path:
-    return Path(__file__).parent.parent.parent / "data" / "clevr" / "CLEVR_v1.0"
+    return utils.clevr_path()
 
 
 def test_lrp_relnet_matches_output(dataset_dir: Path) -> None:

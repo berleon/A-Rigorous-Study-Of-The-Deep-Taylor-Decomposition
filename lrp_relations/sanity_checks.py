@@ -15,6 +15,8 @@ $ python -m sanity_checks_for_relation_networks run \
 
 """
 
+from lrp_relations import enable_deterministic  # noqa isort:skip
+
 import dataclasses
 import itertools
 import pickle
@@ -27,10 +29,6 @@ from tqdm import tqdm
 
 from lrp_relations import data, lrp
 from relation_network.model import RelationNetworks
-
-from lrp_relations import (  # noqa isort:skip
-    enable_determistic,
-)
 
 
 @dataclasses.dataclass(frozen=True)

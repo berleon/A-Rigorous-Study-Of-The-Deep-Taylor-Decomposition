@@ -134,6 +134,19 @@ class LRPViewOfRelationNetwork(nn.Module):
         randomize_questions: bool = False,
         normalize: bool = True,
     ) -> torch.Tensor:
+        return self.get_lrp_saliency_and_logits(
+            image, question, q_len, target, randomize_questions, normalize
+        )[0]
+
+    def get_lrp_saliency_and_logits(
+        self,
+        image: torch.Tensor,
+        question: torch.Tensor,
+        q_len: int,
+        target: Union[int, torch.Tensor],
+        randomize_questions: bool = False,
+        normalize: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         set_lrp_rules(self)
         lrp_attr = captum.attr.LRP(self)
 
@@ -146,7 +159,6 @@ class LRPViewOfRelationNetwork(nn.Module):
             index = torch.randperm(question_embed.shape[1])
             shape = question_embed.shape
             question_embed = question_embed[:, index].contiguous()
-            print(question_embed.shape, shape)
             assert question_embed.shape == shape
 
         saliency = lrp_attr.attribute(
@@ -156,14 +168,14 @@ class LRPViewOfRelationNetwork(nn.Module):
             verbose=False,
         )
 
+        logits = self(image, question_embed)
+
         if normalize:
-            logits = self(image, question_embed)
             explained_logit = logits[torch.arange(len(logits)), target]
-            print(logits.shape, explained_logit.shape)
             # to make the heatmaps comparable we normalize the saliencies
-            return saliency / explained_logit[:, None, None, None]
-        else:
-            return saliency
+            saliency = saliency / explained_logit[:, None, None, None]
+
+        return saliency, logits
 
 
 def set_lrp_rules(lrp_relnet: nn.Module) -> None:
