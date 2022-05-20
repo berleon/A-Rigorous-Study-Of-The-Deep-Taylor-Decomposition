@@ -10,7 +10,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from lrp_relations import sanity_checks_for_relation_networks as relnets
+from lrp_relations import lrp
 from relation_network.dataset import CLEVR, collate_data, transform
 from relation_network.model import RelationNetworks
 
@@ -37,7 +37,7 @@ def test_lrp_relnet_matches_output(dataset_dir: Path) -> None:
     n_words = len(dic["word_dic"]) + 1
     relnet = RelationNetworks(n_words)
     relnet.to(device)
-    lrp_relnet = relnets.LRPViewOfRelationNetwork(relnet)
+    lrp_relnet = lrp.LRPViewOfRelationNetwork(relnet)
     lrp_relnet.to(device)
 
     train_set: DataLoader = DataLoader(
