@@ -145,7 +145,6 @@ def run_training(
             if ckpt.exists():
                 logger.debug(f"Removing {ckpt} with acc {acc}")
                 ckpt.unlink()
-                ckpt.unlink()
             del ckpts[ckpt]
 
     def checkpoint(acc: float) -> None:
