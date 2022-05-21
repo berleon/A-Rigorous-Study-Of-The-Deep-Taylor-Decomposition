@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/Lucas-C/pre-commit-hooks
-    rev: v1.1.13
+    rev: v1.2.0
     hooks:
       - id: forbid-crlf
       - id: remove-crlf
@@ -12,6 +12,10 @@ repos:
       - id: check-merge-conflict
       - id: check-yaml
         args: [ --unsafe ]
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.5.0
+    hooks:
+      - id: nbstripout
   - repo: https://github.com/pre-commit/mirrors-isort
     rev: v5.10.1
     hooks:
