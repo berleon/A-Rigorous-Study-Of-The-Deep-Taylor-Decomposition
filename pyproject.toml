@@ -11,7 +11,7 @@ classifiers = [
 description = "Apply the sanity checks to relation networks."
 homepage = "https://github.com/berleon/sanity_checks_for_relation_networks"
 license = "MIT"
-name = "sanity_checks_for_relation_networks"
+name = "lrp_relations"
 packages = [
   {include = "lrp_relations"},
   {include = "tests", format = "sdist"},
@@ -28,14 +28,18 @@ python = ">=3.9,<4.0"
 savethat = {git = "https://github.com/berleon/savethat", branch = "main"}
 # scikit-learn = {version = "^0.22.1", optional = true}
 torch = [
-  { url = "https://download.pytorch.org/whl/cu113/torch-1.11.0%2Bcu113-cp39-cp39-linux_x86_64.whl", markers = "platform_machine == 'x86_64' and sys_platform == 'linux'"},
-  { version = "^1.11.0", markers = "platform_machine == 'aarch64'" }
+  { url = "https://download.pytorch.org/whl/cu113/torch-1.10.2%2Bcu113-cp39-cp39-linux_x86_64.whl", markers = "platform_machine == 'x86_64' and sys_platform == 'linux'"},
+  { url = "https://download.pytorch.org/whl/cpu/torch-1.10.2-cp39-cp39-manylinux2014_aarch64.whl", markers = "platform_machine == 'aarch64' and sys_platform == 'linux'" }
 ]
 captum = "^0.5.0"
 clevr-xai = {git = "https://github.com/berleon/clevr-xai.git", rev = "poetry"}
 ipython = "^8.3.0"
 nltk = "^3.7"
-torchvision = "^0.12.0"
+torchvision = [
+  { url = "https://download.pytorch.org/whl/cu113/torchvision-0.11.3%2Bcu113-cp39-cp39-linux_x86_64.whl", markers = "platform_machine == 'x86_64' and sys_platform == 'linux'"},
+  { url = "https://download.pytorch.org/whl/cpu/torchvision-0.11.3-cp39-cp39-manylinux2014_aarch64.whl", markers = "platform_machine == 'aarch64' and sys_platform == 'linux'" }
+]
+ipywidgets = "^7.7.0"
 
 [tool.poetry.dev-dependencies]
 
@@ -110,6 +114,7 @@ warn_unused_ignores = true
 
 exclude = [
   'relation_network/',
+  'lrp_relations/sequential_lr_fix.py',
 ]
 
 [[tool.mypy.overrides]]
