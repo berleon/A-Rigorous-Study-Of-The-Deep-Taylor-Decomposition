@@ -208,7 +208,7 @@ def run_training(
         scheduler = sequential_lr_fix.SequentialLR(
             optimizer=optimizer,
             schedulers=[warm_up, decay_scheduler],
-            milestones=[100],
+            milestones=[120],
         )
     else:
         optimizer.param_groups[0]["lr"] = args.lr
