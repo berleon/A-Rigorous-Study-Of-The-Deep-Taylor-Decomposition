@@ -1,3 +1,4 @@
+import json
 import pickle
 from pathlib import Path
 from typing import Optional, Union
@@ -99,9 +100,19 @@ class CLEVR_XAI(torch_data.Dataset):
         with open(questions_pkl, "rb") as f:
             self.data = pickle.load(f)
 
+        questions_json = questions_pkl.with_suffix(".json")
+        with open(questions_json, "r") as f:
+            self.questions_json = json.load(f)["questions"]
+
+    def get_question_and_answer(self, index: int) -> tuple[str, str]:
+        question_idx, _ = self.gt_filenames[index]
+        question = self.questions_json[question_idx]["question"]
+        answer = self.questions_json[question_idx]["answer"]
+        return question, answer
+
     def __getitem__(
         self, index: int
-    ) -> tuple[torch.Tensor, np.ndarray, int, int, torch.Tensor]:
+    ) -> tuple[torch.Tensor, np.ndarray, int, int, int]:
 
         question_idx, gt_path = self.gt_filenames[index]
         imgfile, question, answer, _ = self.data[question_idx]
@@ -121,23 +132,21 @@ class CLEVR_XAI(torch_data.Dataset):
         if self.reverse_question:
             question = question[::-1]
 
+        return img, question, len(question), answer, index
+
+    def get_ground_truth(self, index: int) -> torch.Tensor:
+        _, gt_path = self.gt_filenames[index]
         gt = torch.from_numpy(np.load(gt_path)).float()
-        return img, question, len(question), answer, gt
+        return gt
 
     def __len__(self) -> int:
         return len(self.data)
 
     @staticmethod
     def collate_data(
-        batch: list[tuple[torch.Tensor, np.ndarray, int, int, torch.Tensor]]
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        list[int],
-        torch.Tensor,
-        torch.Tensor,
-    ]:
-        images, lengths, answers, gt_masks = [], [], [], []
+        batch: list[tuple[torch.Tensor, np.ndarray, int, int, int]]
+    ) -> tuple[torch.Tensor, torch.Tensor, list[int], torch.Tensor, list[int]]:
+        images, lengths, answers, indices = [], [], [], []
         batch_size = len(batch)
 
         max_len = max(map(lambda x: len(x[1]), batch))
@@ -146,20 +155,20 @@ class CLEVR_XAI(torch_data.Dataset):
         sort_by_len = sorted(batch, key=lambda x: len(x[1]), reverse=True)
 
         for i, b in enumerate(sort_by_len):
-            image, question, length, answer, gt = b
+            image, question, length, answer, idx = b
             images.append(image)
             length = len(question)
             questions[i, :length] = question
             lengths.append(length)
             answers.append(answer)
-            gt_masks.append(gt)
+            indices.append(idx)
 
         return (
             torch.stack(images),
             torch.from_numpy(questions),
             lengths,
             torch.LongTensor(answers),
-            torch.stack(gt_masks).unsqueeze(1),
+            indices,
         )
 
 
@@ -184,5 +193,6 @@ def get_clevr_xai_loader(
         batch_size=batch_size,
         num_workers=n_worker,
         collate_fn=dataset.collate_data,
+        shuffle=False,
     )
     return loader

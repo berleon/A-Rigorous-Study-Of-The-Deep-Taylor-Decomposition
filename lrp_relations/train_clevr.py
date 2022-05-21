@@ -225,7 +225,7 @@ def run_training(
         for epoch in range(1, args.n_epoch + 1):
             train(epoch)
             scheduler.step()
-            if scheduler.get_last_lr()[0] > args.lr_max:  # type: ignore
+            if scheduler.get_last_lr()[0] > args.lr_max:
                 optimizer.param_groups[0]["lr"] = args.lr_max
 
             acc = valid(epoch)
