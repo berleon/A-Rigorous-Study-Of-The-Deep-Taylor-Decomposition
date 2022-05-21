@@ -12,7 +12,7 @@ from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from lrp_relations import sequential_lr_fix
+from lrp_relations import sequential_lr_fix, utils
 from relation_network.dataset import CLEVR, collate_data, transform
 from relation_network.model import RelationNetworks
 
@@ -38,12 +38,13 @@ class TrainArgs(savethat.Args):
     decay_lr_gamma: float = 0.5
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class Checkpoint:
     path: Path
     accuracy: float
     epoch: int
     keep: bool
+    sha256: str
 
 
 def run_training(
@@ -152,7 +153,7 @@ def run_training(
         print("Avg Acc: {:.5f}".format(acc))
         return acc
 
-    def tidy_checkpoints(ckpts: dict[int, Checkpoint]) -> None:
+    def tidy_checkpoints() -> None:
         ckpts_sorted = sorted(ckpts.items(), key=lambda x: x[1].accuracy)
         for epoch, ckpt in ckpts_sorted[:-3]:
             ckpt_path = ckpt_dir / ckpt.path
@@ -161,14 +162,23 @@ def run_training(
                 ckpt_path.unlink()
                 del ckpts[epoch]
 
-    def checkpoint(acc: float) -> None:
+    def checkpoint(acc: float, keep: bool = False) -> None:
         ckpt_filename = Path(f"checkpoint_{str(epoch).zfill(3)}.model")
-        ckpts[epoch] = Checkpoint(
-            ckpt_filename, acc, epoch, keep=epoch % 10 == 0
+
+        ckpt_path = ckpt_dir / ckpt_filename
+        logger.debug(
+            f"Saving checkpoint with accuracy {acc:.4f} to {ckpt_path}"
         )
-        logger.debug(f"Saving checkpoint to {ckpt_filename} with acc: {acc}")
-        with open(ckpt_filename, "wb") as fb:
+        with open(ckpt_path, "wb") as fb:
             torch.save(relnet.state_dict(), fb)
+
+        ckpts[epoch] = Checkpoint(
+            ckpt_filename,
+            acc,
+            epoch,
+            keep=keep,
+            sha256=utils.sha256sum(ckpt_path),
+        )
 
     with open(data_root / "dic.pkl", "rb") as f:
         dic = pickle.load(f)
@@ -184,6 +194,9 @@ def run_training(
     optimizer = optim.Adam(
         relnet.parameters(), lr=args.lr_max, weight_decay=args.weight_decay
     )
+    ckpts: dict[int, Checkpoint] = {}
+
+    # Setup scheduler
     scheduler: lr_scheduler._LRScheduler
     if args.warmup_and_decay:
         warm_up = lr_scheduler.LinearLR(
@@ -203,13 +216,9 @@ def run_training(
             optimizer, step_size=args.lr_step, gamma=args.lr_gamma
         )
 
+    print("Evaluating initial model:")
     acc = valid(0)
-    ckpts: dict[int, Checkpoint] = {
-        0: Checkpoint(Path("initial_weights.model"), acc, 0, keep=True)
-    }
-
-    with open(ckpt_dir / "initial_weights.model", "wb") as fb:
-        torch.save(relnet.state_dict(), fb)
+    checkpoint(acc, keep=True)
 
     try:
         for epoch in range(1, args.n_epoch + 1):
@@ -219,8 +228,8 @@ def run_training(
                 optimizer.param_groups[0]["lr"] = args.lr_max
 
             acc = valid(epoch)
-            checkpoint(acc)
-            tidy_checkpoints(ckpts)
+            checkpoint(acc, keep=epoch % 10 == 1)
+            tidy_checkpoints()
     except Exception as e:
         logger.error(e)
     finally:

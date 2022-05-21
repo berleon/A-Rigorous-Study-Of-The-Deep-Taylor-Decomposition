@@ -1,3 +1,4 @@
+import hashlib
 import socket
 from pathlib import Path
 from typing import Optional
@@ -31,3 +32,13 @@ def clevr_xai_path() -> Path:
         return Path("/srv/data/leonsixt/lrp_relations/data/CLEVR-XAI_v1.0")
     else:
         raise ValueError()
+
+
+def sha256sum(filename: Path) -> str:
+    h = hashlib.sha256()
+    b = bytearray(128 * 1024)
+    mv = memoryview(b)
+    with open(filename, "rb", buffering=0) as f:
+        while n := f.readinto(mv):
+            h.update(mv[:n])
+    return h.hexdigest()
