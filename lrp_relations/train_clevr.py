@@ -216,6 +216,7 @@ def run_training(
             optimizer, step_size=args.lr_step, gamma=args.lr_gamma
         )
 
+    epoch = 0
     print("Evaluating initial model:")
     acc = valid(0)
     checkpoint(acc, keep=True)
