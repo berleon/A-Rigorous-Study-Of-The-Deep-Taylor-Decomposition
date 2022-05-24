@@ -1,3 +1,4 @@
+import dataclasses
 from typing import Callable, Union
 
 import torch
@@ -96,7 +97,7 @@ class NLayerMLP(nn.Module):
         return x
 
 
-def root_point(
+def root_point_linear(
     x: torch.Tensor,
     layer: LinearReLU,
     j: int,
@@ -157,6 +158,166 @@ def root_point(
     return root_point
 
 
+@dataclasses.dataclass
+class LayerDTD:
+    layer: LinearReLU
+    layer_idx: int
+    input: torch.Tensor
+    output: torch.Tensor
+    root: torch.Tensor
+
+
+@dataclasses.dataclass
+class PreciseDTD:
+    net: NLayerMLP
+    input: torch.Tensor
+    explained_class: int
+    rule: str = "z+"
+    root_max_relevance: float = 1e-4
+    max_search_tries: int = 10
+    results: dict[LinearReLU, LayerDTD] = dataclasses.field(
+        default_factory=dict
+    )
+
+    # Helper functions
+
+    def is_first_layer(self, layer: LinearReLU) -> bool:
+        return layer == self.net.layers[0]
+
+    def is_final_layer(self, layer: LinearReLU) -> bool:
+        return layer == self.net.layers[-1]
+
+    def get_next_layer(self, layer: LinearReLU) -> LinearReLU:
+        """Returns the next layer in the network."""
+        return self.net.layers[self.net.layers.index(layer) + 1]
+
+    def get_layer_index(self, layer: LinearReLU) -> int:
+        return self.net.layers.index(layer)
+
+    def get_prev_layer(self, layer: LinearReLU) -> LinearReLU:
+        """Returns the previous layer in the network."""
+        return self.net.layers[self.net.layers.index(layer) - 1]
+
+    def get_input(self, layer: LinearReLU) -> torch.Tensor:
+        """Returns the input of the layer."""
+        if self.is_first_layer(layer):
+            return self.input
+        return self.outputs[self.get_prev_layer(layer)][0]
+
+    def get_output(self, layer: LinearReLU) -> torch.Tensor:
+        """Returns the output of the layer."""
+        return self.outputs[layer][0]
+
+    # Actual computation
+
+    def compute_relevance_of_input(
+        self,
+        layer: LinearReLU,
+        root: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute the relevance of each neuron in a layer.
+
+        Args:
+            layer: Layer to compute the relevance.
+            layer_activations: Activations of the layer.
+            root: Root point of the layer.
+        Returns:
+            The relevance of each neuron in the layer.
+        """
+
+        if self.is_final_layer(layer):
+            input = self.get_input(layer).clone()
+            input.requires_grad_(True)
+            out = layer.linear(input)
+            R = out[:, self.explained_class]
+            (dR_droot,) = torch.autograd.grad([R], [input], torch.ones_like(R))
+        else:
+            next_layer = self.get_next_layer(layer)
+            root.requires_grad_(True)
+            root_out = layer(root)
+            R = self.compute_relevance_of_input(next_layer, root_out).sum(1)
+            (dR_droot,) = torch.autograd.grad([R], [root], torch.ones_like(R))
+        return dR_droot * (self.get_input(layer) - root)
+
+    def _record_activations(self):
+        with record_all_outputs(self.net) as self.outputs:
+            self.net(self.input)
+
+    def explain(self) -> torch.Tensor:
+        self._record_activations()
+
+        for layer in reversed(self.net.layers):
+            root = self.find_root_point(layer)
+            self.results[layer] = LayerDTD(
+                layer,
+                self.net.layers.index(layer),
+                self.get_input(layer),
+                self.get_output(layer),
+                root,
+            )
+        first_layer = self.net.layers[0]
+        return self.compute_relevance_of_input(
+            first_layer, self.results[first_layer].root
+        )
+
+    def sample_search_space(
+        self,
+        activation: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sample a search space for the given activation."""
+        x = activation.new_empty(size=(1000, activation.shape[1]))
+        x.uniform_(0, 1)
+        return x
+
+    def find_root_point(
+        self,
+        layer: LinearReLU,
+    ) -> torch.Tensor:
+        """Find the root point of a layer."""
+
+        layer_input = self.get_input(layer)
+        # layer_output = self.get_output(layer)
+        if self.is_final_layer(layer):
+            return root_point_linear(
+                layer_input, layer, self.explained_class, self.rule
+            )
+
+        next_layer = self.get_next_layer(layer)
+
+        for i in range(self.max_search_tries):
+            coarse_search = self.sample_search_space(layer_input)
+            coarse_hidden = layer(coarse_search)
+            rel_coarse = self.compute_relevance_of_input(
+                next_layer, coarse_hidden
+            )
+            mask = rel_coarse.sum(dim=1) <= self.root_max_relevance
+
+            if mask.sum() > 1:
+                candidates = coarse_search[mask.nonzero()]
+                break
+
+        if mask.sum() == 0:
+            raise ValueError("Could not find suitable root point")
+
+        steps = torch.linspace(-0.3, 1.05, 100).view(-1, 1)
+
+        closest_relu_candidates = []
+        distances_to_input = []
+        for candidate in candidates:
+            line_search = candidate + steps * (layer_input - candidate)
+            line_hidden = layer(line_search)
+            rel_line = self.compute_relevance_of_input(next_layer, line_hidden)
+            root_idx = (
+                (rel_line.sum(1) <= self.root_max_relevance).nonzero().max()
+            )
+            closest_relu_candidates.append(line_search[root_idx])
+            distances_to_input.append(
+                (layer_input - line_search[root_idx]).norm(p=2)
+            )
+        idx = torch.stack(distances_to_input).argmin()
+        return closest_relu_candidates[idx]
+
+
 def get_relevance_hidden(
     net: TwoLayerMLP,
     x: torch.Tensor,
@@ -195,7 +356,9 @@ def get_relevance_hidden_and_root(
 
     # outputs
     hidden = outputs[net.layer1][0]
-    hidden_root = root_point(hidden, net.layer2, j, rule=rule, gamma=gamma)
+    hidden_root = root_point_linear(
+        hidden, net.layer2, j, rule=rule, gamma=gamma
+    )
 
     assert torch.isnan(hidden_root).sum() == 0
 

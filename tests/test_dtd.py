@@ -11,7 +11,7 @@ def test_dtd_root():
     x = (0.25 * torch.randn(2, 3, requires_grad=True) + 1).clamp(min=0)
 
     for rule in ["0", "z+", "w2", "gamma"]:
-        x_root = dtd.root_point(x, net.layer1, idx, rule=rule)
+        x_root = dtd.root_point_linear(x, net.layer1, idx, rule=rule)
 
         x_root.shape, x.shape
         print("x", x)
@@ -49,7 +49,7 @@ def test_dtd_input_root():
             logit_x = net(x)
 
         rel_hidden = relevance_fn(net, x)
-        hidden_root = dtd.root_point(
+        hidden_root = dtd.root_point_linear(
             x_outs[net.layer1][0], net.layer2, 0, rule=rule, gamma=1000
         )
         print("hidden_root", hidden_root)
@@ -79,3 +79,34 @@ def test_almost_unique():
 
     unique_idx = dtd.almost_unique(x, atol=atol).tolist()
     assert unique_idx == [0, 1, 1, 0, 2]
+
+
+def test_dtd_precise():
+
+    torch.manual_seed(0)
+
+    x = torch.rand(1, 5)
+    net = dtd.NLayerMLP(
+        n_layers=3,
+        input_size=5,
+        hidden_size=10,
+        output_size=2,
+    )
+    precise_dtd = dtd.PreciseDTD(
+        net, x, explained_class=0, rule="z+", root_max_relevance=1e-3
+    )
+    precise_dtd._record_activations()
+    last_layer = net.layers[-1]
+    root_last_layer = precise_dtd.find_root_point(last_layer)
+    assert (root_last_layer >= 0).all()
+    assert root_last_layer.shape == (1, 10)
+
+    random_root = torch.rand(50, 10)
+    rel_random_root = precise_dtd.compute_relevance_of_input(
+        last_layer, random_root
+    )
+    assert rel_random_root.shape == (50, 10)
+    rel_input = precise_dtd.explain()
+    assert isinstance(rel_input, torch.Tensor)
+    assert rel_input.shape == (1, 5)
+    assert rel_input.sum() >= 0.0
