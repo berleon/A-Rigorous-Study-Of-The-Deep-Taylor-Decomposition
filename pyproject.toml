@@ -124,6 +124,7 @@ module = [
   "captum.*",
   "coverage",
   "matplotlib",
+  "matplotlib.*",
   "nltk",
   "pandas",
   "PIL",
