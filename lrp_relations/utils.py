@@ -4,12 +4,27 @@ from pathlib import Path
 from typing import Optional
 
 import savethat
+import toml
+from savethat import env as env_mod
 
 
 def find_credential_file() -> Optional[Path]:
     pkg_dir = Path(__file__).parent
     creds = pkg_dir.parent.parent / "savethat_credentials.toml"
     return creds if creds.exists() else None
+
+
+def set_project_dir() -> None:
+    pkg_dir = Path(__file__).parent
+    env_mod.set_project_dir(pkg_dir.parent)
+
+
+def get_credentials() -> env_mod.B2Credentials:
+    pkg_dir = Path(__file__).parent
+    cred_path = pkg_dir.parent.parent / "savethat_credentials.toml"
+    with open(cred_path) as f:
+        creds = toml.load(f)
+    return env_mod.B2Credentials(**creds["lrp_relations"])
 
 
 def get_storage() -> savethat.Storage:
