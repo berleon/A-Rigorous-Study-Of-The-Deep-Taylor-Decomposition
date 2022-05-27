@@ -93,11 +93,19 @@ def test_dtd_precise():
         output_size=2,
     )
     precise_dtd = dtd.PreciseDTD(
-        net, x, explained_class=0, rule="z+", root_max_relevance=1e-3
+        net,
+        explained_class=0,
+        rule="z+",
+        root_max_relevance=1e-3,
+        n_random_samples=10,
     )
-    precise_dtd._record_activations()
+    with dtd.record_all_outputs(net) as outs:
+        net(x)
     last_layer = net.layers[-1]
-    root_last_layer = precise_dtd.find_root_point(last_layer)
+    input_last_layer = outs[net.layers[-2]][0]
+    root_last_layer = precise_dtd.find_root_point(
+        last_layer, input_last_layer, must_be_positive=True
+    )
     assert (root_last_layer >= 0).all()
     assert root_last_layer.shape == (1, 10)
 
@@ -106,7 +114,26 @@ def test_dtd_precise():
         last_layer, random_root
     )
     assert rel_random_root.shape == (50, 10)
-    rel_input = precise_dtd.explain()
-    assert isinstance(rel_input, torch.Tensor)
-    assert rel_input.shape == (1, 5)
-    assert rel_input.sum() >= 0.0
+
+
+def test_dtd_precise_explain():
+
+    torch.manual_seed(0)
+
+    x = torch.rand(1, 5)
+    net = dtd.NLayerMLP(
+        n_layers=3,
+        input_size=5,
+        hidden_size=10,
+        output_size=2,
+    )
+    precise_dtd = dtd.PreciseDTD(
+        net,
+        explained_class=0,
+        rule="z+",
+        root_max_relevance=1e-3,
+        n_random_samples=10,
+    )
+    x = torch.rand(1, 5)
+    ctx = precise_dtd.explain(x)
+    assert ctx[net.layers[0]].relevance.shape == (1, 5)

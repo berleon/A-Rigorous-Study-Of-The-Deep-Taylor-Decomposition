@@ -1,9 +1,10 @@
 import dataclasses
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 
 import torch
 from torch import nn
 from torch.utils import hooks
+from tqdm.auto import tqdm
 
 
 class record_all_outputs:
@@ -91,10 +92,34 @@ class NLayerMLP(nn.Module):
             setattr(self, f"layer{i + 1}", layer)
             self.layers.append(layer)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        first: Optional[LinearReLU] = None,
+        last: Optional[LinearReLU] = None,
+    ) -> torch.Tensor:
+        if first is None:
+            first = self.layers[0]
+        if last is None:
+            last = self.layers[-1]
+
+        first_seen = False
+
         for layer in self.layers:
-            x = layer(x)
+            if layer == first:
+                first_seen = True
+
+            if first_seen:
+                x = layer(x)
+            if layer == last:
+                break
         return x
+
+
+def grad_mask_for_logit(output: torch.Tensor, index: int) -> torch.Tensor:
+    mask = output.new_zeros(output.shape, dtype=torch.float)
+    mask[:, index] = 1.0
+    return mask
 
 
 def root_point_linear(
@@ -168,16 +193,96 @@ class LayerDTD:
 
 
 @dataclasses.dataclass
+class RootConstraint:
+    positive: bool  # root point must be positive
+    gradient_close: bool  # root point must have the same gradient as input
+    gradient_atol: float = 1e-6
+
+    def is_fulfilled(
+        self,
+        root: torch.Tensor,
+        input_grad: Optional[torch.Tensor] = None,
+        root_grad: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        mask = root.new_ones((len(root),), dtype=torch.bool)
+        if self.positive:
+            mask[(root < 0).any(1)] = False
+        if self.gradient_close:
+            if input_grad is None or root_grad is None:
+                mask[:] = False
+                return mask
+            grad_close = torch.isclose(
+                root.grad,
+                input_grad,
+                atol=self.gradient_atol,
+            )
+            mask[~grad_close] = False
+        return mask
+
+
+class RootFinding:
+    constraint: RootConstraint
+
+
+@dataclasses.dataclass
+class RandomSampling(RootFinding):
+    constraint: RootConstraint
+    n_samples: int
+    layer: LinearReLU
+    root_max_relevance: float = 1e-4
+    max_search_tries: int = 10
+
+
+class PrecomputedRoot(RootFinding):
+    def __init__(self, root: torch.Tensor):
+        self.root = root
+
+    def find(self, input: torch.Tensor) -> torch.Tensor:
+        return self.root
+
+
+@dataclasses.dataclass
+class LayerRelContext:
+    layer: LinearReLU
+    # input
+    input: torch.Tensor
+    logit: torch.Tensor
+    grad_input: torch.Tensor
+    # root
+    root: torch.Tensor
+    root_logit: torch.Tensor
+    grad_root: torch.Tensor
+    # relevance
+    relevance: torch.Tensor
+    #
+    # root_finding: RootFinding
+
+
+@dataclasses.dataclass
+class RelevanceContext:
+    layers: list[LayerRelContext]
+
+
+@dataclasses.dataclass
+class LayerOptions:
+    root_must_be_positive: bool = True
+
+
+@dataclasses.dataclass
 class PreciseDTD:
     net: NLayerMLP
-    input: torch.Tensor
     explained_class: int
     rule: str = "z+"
     root_max_relevance: float = 1e-4
     max_search_tries: int = 10
-    results: dict[LinearReLU, LayerDTD] = dataclasses.field(
+    n_random_samples: int = 50
+    options: dict[LinearReLU, LayerOptions] = dataclasses.field(
         default_factory=dict
     )
+
+    def __post_init__(self):
+        if not self.options:
+            self.options = {layer: LayerOptions() for layer in self.net.layers}
 
     # Helper functions
 
@@ -198,124 +303,189 @@ class PreciseDTD:
         """Returns the previous layer in the network."""
         return self.net.layers[self.net.layers.index(layer) - 1]
 
-    def get_input(self, layer: LinearReLU) -> torch.Tensor:
-        """Returns the input of the layer."""
-        if self.is_first_layer(layer):
-            return self.input
-        return self.outputs[self.get_prev_layer(layer)][0]
-
-    def get_output(self, layer: LinearReLU) -> torch.Tensor:
-        """Returns the output of the layer."""
-        return self.outputs[layer][0]
-
     # Actual computation
 
     def compute_relevance_of_input(
         self,
         layer: LinearReLU,
-        root: torch.Tensor,
+        input: torch.Tensor,
+        context: Optional[dict[LinearReLU, LayerRelContext]] = None,
+        show_progress: bool = False,
     ) -> torch.Tensor:
         """Compute the relevance of each neuron in a layer.
 
         Args:
             layer: Layer to compute the relevance.
-            layer_activations: Activations of the layer.
-            root: Root point of the layer.
+            input: The input to the layer.
         Returns:
             The relevance of each neuron in the layer.
         """
+        root = self.find_root_point(
+            layer,
+            input,
+            self.options[layer].root_must_be_positive,
+            show_progress,
+        )
+        root.requires_grad_(True)
 
         if self.is_final_layer(layer):
-            input = self.get_input(layer).clone()
-            input.requires_grad_(True)
-            out = layer.linear(input)
+            out = layer.linear(root)
             R = out[:, self.explained_class]
-            (dR_droot,) = torch.autograd.grad([R], [input], torch.ones_like(R))
+            (dR_droot,) = torch.autograd.grad([R], [root], torch.ones_like(R))
         else:
             next_layer = self.get_next_layer(layer)
             root.requires_grad_(True)
             root_out = layer(root)
             R = self.compute_relevance_of_input(next_layer, root_out).sum(1)
             (dR_droot,) = torch.autograd.grad([R], [root], torch.ones_like(R))
-        return dR_droot * (self.get_input(layer) - root)
 
-    def _record_activations(self):
-        with record_all_outputs(self.net) as self.outputs:
-            self.net(self.input)
+        relevance = dR_droot * (input - root)
 
-    def explain(self) -> torch.Tensor:
-        self._record_activations()
+        if context is not None:
+            input.requires_grad_(True)
+            logit = self.net(input, first=layer)
+            grad_mask = grad_mask_for_logit(logit, self.explained_class)
+            (grad_input,) = torch.autograd.grad([logit], [input], grad_mask)
 
-        for layer in reversed(self.net.layers):
-            root = self.find_root_point(layer)
-            self.results[layer] = LayerDTD(
-                layer,
-                self.net.layers.index(layer),
-                self.get_input(layer),
-                self.get_output(layer),
-                root,
+            root_logit = self.net(root, first=layer)
+            grad_mask = grad_mask_for_logit(root_logit, self.explained_class)
+            (grad_root,) = torch.autograd.grad([root_logit], [root], grad_mask)
+
+            context[layer] = LayerRelContext(
+                layer=layer,
+                input=input,
+                logit=logit,
+                grad_input=grad_input,
+                root=root,
+                root_logit=root_logit,
+                grad_root=grad_root,
+                relevance=relevance,
             )
+        return relevance
+
+    def explain(
+        self, input: torch.Tensor, show_progress: bool = False
+    ) -> dict[LinearReLU, LayerRelContext]:
         first_layer = self.net.layers[0]
-        return self.compute_relevance_of_input(
-            first_layer, self.results[first_layer].root
+        context: dict[LinearReLU, LayerRelContext] = {}
+
+        self.compute_relevance_of_input(
+            first_layer, input, context, show_progress
         )
+        return context
 
     def sample_search_space(
         self,
         activation: torch.Tensor,
+        must_be_positive: bool = False,
     ) -> torch.Tensor:
         """Sample a search space for the given activation."""
-        x = activation.new_empty(size=(1000, activation.shape[1]))
+        x = activation.new_empty(
+            size=(self.n_random_samples, activation.shape[1])
+        )
+
         x.uniform_(0, 1)
+        if must_be_positive:
+            x = x.clamp(min=0)
         return x
 
     def find_root_point(
         self,
         layer: LinearReLU,
+        input: torch.Tensor,
+        must_be_positive: bool = False,
+        show_progress: bool = False,
     ) -> torch.Tensor:
-        """Find the root point of a layer."""
+        """Find the root point of a layer.
 
-        layer_input = self.get_input(layer)
-        # layer_output = self.get_output(layer)
-        if self.is_final_layer(layer):
-            return root_point_linear(
-                layer_input, layer, self.explained_class, self.rule
+        Args:
+            layer: The layer to find the root point of.
+            input: The input to the layer.
+
+        Returns:
+            The root point of the layer.
+        """
+        if input.dim == 1:
+            input.unsqueeze_(0)
+
+        def get_relevance(x: torch.Tensor) -> torch.Tensor:
+            if next_layer is None:  # is_final_layer == True
+                # this is the final layer
+                # just use the explained class as the relevance
+                R = x[:, self.explained_class].unsqueeze(1)
+                return R
+            else:
+                return self.compute_relevance_of_input(next_layer, x)
+
+        is_final_layer = self.is_final_layer(layer)
+        next_layer = self.get_next_layer(layer) if not is_final_layer else None
+
+        roots = []
+        for sample_idx, single_input in enumerate(input):
+            single_input = single_input.unsqueeze(0)
+
+            pbar = tqdm(
+                list(range(self.max_search_tries)),
+                disable=not show_progress,
+                desc=f"[{sample_idx}/{len(input)}] Random sampling",
             )
+            for i in pbar:
+                # TODO: restrict the search space
+                coarse_search = self.sample_search_space(
+                    single_input, must_be_positive
+                )
 
-        next_layer = self.get_next_layer(layer)
+                coarse_hidden = layer(coarse_search)
+                rel_coarse = get_relevance(coarse_hidden)
 
-        for i in range(self.max_search_tries):
-            coarse_search = self.sample_search_space(layer_input)
-            coarse_hidden = layer(coarse_search)
-            rel_coarse = self.compute_relevance_of_input(
-                next_layer, coarse_hidden
+                mask = rel_coarse.sum(dim=1) <= self.root_max_relevance
+
+                if mask.sum() > 1:
+                    candidates = coarse_search[mask.nonzero()]
+                    break
+            print("stopped at", i)
+            if mask.sum() == 0:
+                raise ValueError("Could not find suitable root point")
+
+            closest_relu_candidates = []
+            distances_to_input = []
+
+            pbar_candidates = tqdm(
+                candidates,
+                disable=not show_progress,
+                desc=f"[{sample_idx}/{len(input)}] Fine-tune sampling",
             )
-            mask = rel_coarse.sum(dim=1) <= self.root_max_relevance
+            for candidate in pbar_candidates:
+                diff_to_input = single_input - candidate
 
-            if mask.sum() > 1:
-                candidates = coarse_search[mask.nonzero()]
-                break
+                def get_center_factor():
+                    return lower + (upper - lower) / 2
 
-        if mask.sum() == 0:
-            raise ValueError("Could not find suitable root point")
+                def get_center():
+                    mid = get_center_factor()
+                    return candidate + mid * diff_to_input
 
-        steps = torch.linspace(-0.3, 1.05, 100).view(-1, 1)
+                lower = -0.3
+                upper = 1.05
+                while True:
+                    center = get_center()
+                    rel = get_relevance(center)
+                    if rel.sum() > self.root_max_relevance:
+                        upper = get_center_factor()
+                    else:
+                        lower = get_center_factor()
 
-        closest_relu_candidates = []
-        distances_to_input = []
-        for candidate in candidates:
-            line_search = candidate + steps * (layer_input - candidate)
-            line_hidden = layer(line_search)
-            rel_line = self.compute_relevance_of_input(next_layer, line_hidden)
-            root_idx = (
-                (rel_line.sum(1) <= self.root_max_relevance).nonzero().max()
-            )
-            closest_relu_candidates.append(line_search[root_idx])
-            distances_to_input.append(
-                (layer_input - line_search[root_idx]).norm(p=2)
-            )
-        idx = torch.stack(distances_to_input).argmin()
-        return closest_relu_candidates[idx]
+                    diff = (rel.sum() - self.root_max_relevance).abs()
+                    print(diff)
+                    if diff < 1e-3:
+                        break
+
+                closest_relu_candidates.append(center)
+                distances_to_input.append((input - center).norm(p=2))
+                pbar_candidates.refresh()
+            idx = torch.stack(distances_to_input).argmin()
+            roots.append(closest_relu_candidates[idx])
+        return torch.stack(roots)
 
 
 def get_relevance_hidden(
@@ -397,6 +567,7 @@ def find_input_root_point(
     Returns:
         The root point of the input layer.
     """
+
     assert x.size(0) == 1
     length = 3 * torch.randn(n_samples, 1) + 5
     x_search = x + torch.randn(n_samples, x.size(1)) * length
