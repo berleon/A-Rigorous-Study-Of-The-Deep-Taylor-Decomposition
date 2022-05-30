@@ -41,6 +41,8 @@ class record_all_outputs:
 class LinearReLU(nn.Module):
     def __init__(self, in_features: int, out_features: int):
         super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
         self.linear = nn.Linear(in_features, out_features)
         self.relu = nn.ReLU()
 
@@ -114,6 +116,25 @@ class NLayerMLP(nn.Module):
             if layer == last:
                 break
         return x
+
+    # helper functions
+
+    def is_first_layer(self, layer: LinearReLU) -> bool:
+        return layer == self.layers[0]
+
+    def is_final_layer(self, layer: LinearReLU) -> bool:
+        return layer == self.layers[-1]
+
+    def get_next_layer(self, layer: LinearReLU) -> LinearReLU:
+        """Returns the next layer in the network."""
+        return self.layers[self.layers.index(layer) + 1]
+
+    def get_layer_index(self, layer: LinearReLU) -> int:
+        return self.layers.index(layer)
+
+    def get_prev_layer(self, layer: LinearReLU) -> LinearReLU:
+        """Returns the previous layer in the network."""
+        return self.layers[self.layers.index(layer) - 1]
 
 
 def grad_mask_for_logit(output: torch.Tensor, index: int) -> torch.Tensor:
