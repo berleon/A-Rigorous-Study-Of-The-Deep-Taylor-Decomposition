@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from lrp_relations import dtd
@@ -14,6 +15,8 @@ def test_dtd_root():
         x_root = dtd.compute_root_for_single_neuron(
             x, net.layer1, idx, rule=rule
         )
+
+        assert x_root is not None
 
         x_root.shape, x.shape
         print("x", x)
@@ -38,21 +41,21 @@ def test_dtd_input_root():
     torch.manual_seed(3)
     x = (0.25 * torch.randn(1, 3, requires_grad=True) + 3).clamp(min=0)
 
-    rules = ["0", "z+", "w2", "gamma"]
+    rules: list[dtd.RULE] = ["0", "z+", "w2", dtd.GammaRule(1000)]
 
     for rule in rules:
         print("-" * 80)
         print("Rule:", rule)
 
         def relevance_fn(net: dtd.TwoLayerMLP, x: torch.Tensor) -> torch.Tensor:
-            return dtd.get_relevance_hidden(net, x, rule=rule, gamma=1000)
+            return dtd.get_relevance_hidden(net, x, rule=rule)
 
         with dtd.record_all_outputs(net) as x_outs:
             logit_x = net(x)
 
         rel_hidden = relevance_fn(net, x)
         hidden_root = dtd.compute_root_for_single_neuron(
-            x_outs[net.layer1][0], net.layer2, 0, rule=rule, gamma=1000
+            x_outs[net.layer1][0], net.layer2, 0, rule=rule
         )
         print("hidden_root", hidden_root)
         print("x", x)
@@ -139,3 +142,82 @@ def test_dtd_precise_explain():
     x = torch.rand(1, 5)
     ctx = precise_dtd.explain(x)
     assert ctx[net.layers[0]].relevance.shape == (1, 5)
+
+
+def test_decompose_relevance_fns_full():
+    torch.autograd.set_detect_anomaly(True)
+
+    rule = dtd.rules.z_plus
+    explained_output = 0
+
+    torch.manual_seed(0)
+    mlp = dtd.MLP(5, 10, 10, 2)
+    mlp.init_weights()
+
+    torch.manual_seed(0)
+    for _ in range(100):
+        x = torch.randn(1, mlp.input_size)
+        if mlp(x)[:, explained_output] <= 0:
+            continue
+        break
+
+    decomposed_fns = dtd.get_decompose_relevance_fns(
+        mlp, explained_output=explained_output, rule=rule, decomposition="full"
+    )
+
+    with pytest.raises(ValueError):
+        decomposed_fns[-1](x)
+
+
+def test_decompose_relevance_fns_train_free():
+    # torch.autograd.set_detect_anomaly(True)
+    torch.set_default_dtype(torch.float64)
+
+    rule = dtd.rules.z_plus
+    explained_output = 0
+
+    torch.manual_seed(2)
+    mlp = dtd.MLP(5, 10, 10, 2)
+    mlp.init_weights()
+
+    torch.manual_seed(4)
+    for _ in range(1_000):
+        x = torch.randn(1, mlp.input_size)
+        if mlp(x)[:, explained_output] <= 0.25:
+            continue
+        break
+
+    assert mlp(x)[:, explained_output] > 0.25
+
+    decomposed_fns = dtd.get_decompose_relevance_fns(
+        mlp,
+        explained_output=explained_output,
+        rule=rule,
+        decomposition="train_free",
+    )
+
+    decomposition = decomposed_fns[-1](x)
+
+    for rel in decomposition.collect_relevances():
+        if isinstance(rel, dtd.TrainFreeRel):
+            layer_idx = mlp.get_layer_index(rel.relevance_fn.to_input_of)
+            print(
+                layer_idx,
+                rel.relevance.sum().item(),
+                (rel.relevance < 0).sum().item(),
+            )
+        elif isinstance(rel, dtd.OutputRel):
+            print("output", rel.relevance.sum())
+
+    assert isinstance(decomposition, dtd.TrainFreeRel)
+    assert decomposition.relevance.shape == (1, 10)
+    assert decomposition.relevance.sum() > 0
+
+    print(decomposition.relevance.sum())
+
+    for rel in decomposition.collect_relevances():
+        assert rel.relevance.sum() > 0
+
+        assert torch.allclose(
+            rel.relevance.sum(), decomposition.relevance.sum(), atol=1e-2
+        )
