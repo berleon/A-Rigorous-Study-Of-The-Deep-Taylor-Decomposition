@@ -1,7 +1,7 @@
-site_name: sanity_checks_for_relation_networks
-site_url: https://berleon.github.io/sanity_checks_for_relation_networks
-repo_url: https://github.com/berleon/sanity_checks_for_relation_networks
-repo_name: berleon/sanity_checks_for_relation_networks
+site_name: lrp_relations
+site_url: https://berleon.github.io/lrp_relations
+repo_url: https://github.com/berleon/lrp_relations
+repo_name: berleon/lrp_relations
 #strict: true
 nav:
   - Home: index.md
@@ -51,7 +51,7 @@ plugins:
       lang: en
   - mkdocstrings:
       watch:
-        - sanity_checks_for_relation_networks
+        - lrp_relations
 extra:
   social:
     - icon: fontawesome/brands/twitter
@@ -63,7 +63,7 @@ extra:
       link: https://github.com/waynerv/cookiecutter-pypackage
       name: Facebook
     - icon: fontawesome/brands/github
-      link: https://github.com/berleon/sanity_checks_for_relation_networks
+      link: https://github.com/berleon/lrp_relations
       name: Github
     - icon: material/email
       link: "mailto:github@leon-sixt.de"

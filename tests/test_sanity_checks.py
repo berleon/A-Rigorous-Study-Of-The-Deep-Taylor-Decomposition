@@ -22,6 +22,13 @@ def dataset_dir() -> Path:
     return utils.clevr_path()
 
 
+try:
+    clevr_available = utils.clevr_path().exists()
+except ValueError:
+    clevr_available = False
+
+
+@pytest.mark.skipif(not clevr_available, reason="CLEVR DATASET not available")
 def test_lrp_relnet_matches_output(dataset_dir: Path) -> None:
 
     with open(dataset_dir / "dic.pkl", "rb") as f:

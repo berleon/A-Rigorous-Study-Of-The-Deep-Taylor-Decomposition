@@ -236,7 +236,7 @@ def compute_root_for_single_neuron(
         j: Index of which neuron to compute the root point.
         rule: Rule to compute the root point (supported: `z+`, `w2`, and
             `gamma`).
-        gamma: Scaling factor for DTD gamma rule
+
     Returns:
         A root point `r` with the property `layer(r)[j] == 0`.
     """
@@ -628,7 +628,7 @@ class RootPoint:
     layer: LinearReLU
     rule: Rule
     explained_neuron: Union[int, slice]
-    relevance: torch.Tensor
+    relevance: Optional[torch.Tensor]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -644,10 +644,12 @@ class RecursiveRoots:
         layer: LinearReLU,
         input: torch.Tensor,
         relevance: Optional[torch.Tensor],
-    ):
+    ) -> list[RootPoint]:
         rule = getattr(layer, "rule", None) or self.rule
         if is_layer_rule(rule):
-            roots = [compute_root_for_layer(input, layer, rule, relevance)]
+            roots: list[Optional[torch.Tensor]] = [
+                compute_root_for_layer(input, layer, rule, relevance)
+            ]
         else:
             explained_neurons = list(range(layer.out_features))
             if self.mlp.is_final_layer(layer):
@@ -727,7 +729,6 @@ class RecursiveRoots:
 
         Args:
             input: The input to the neural network.
-            first_root_layer: The first layer to use as root.
             start_at: The layer to start with computing roots.
             end_at: The last layer to compute roots for.
             is_hidden: Whether the input is the hidden input to the layer
@@ -904,7 +905,7 @@ class DecomposedRelFn(RelevanceFn[DecomposedRel]):
                 if i == 0 and self.stabilize_grad is not None:
                     noise_std = self.stabilize_grad.noise_std
                     noise = noise_std * torch.randn_like(root.root)
-                    root.root = root_point + noise
+                    root.root[:] = root_point + noise
                 grad_root, rel_from, rel_info_from = get_grad_and_rel(root)
 
                 has_nans = not torch.isfinite(grad_root).all()
@@ -935,7 +936,7 @@ class DecomposedRelFn(RelevanceFn[DecomposedRel]):
 
 @dataclasses.dataclass(frozen=True)
 class TrainFreeRel(Relevance):
-    roots: list[RecursiveRoot]
+    roots: list[RootPoint]
     grad_roots: list[torch.Tensor]
     roots_relevance: list[torch.Tensor]
     relevance_of_upper_layer: Relevance
@@ -950,7 +951,12 @@ class TrainFreeRel(Relevance):
         )
 
     def collect_relevances(self) -> list[Relevance]:
-        return [self] + self.relevance_of_upper_layer.collect_relevances()
+        self_rel: list[Relevance] = [self]
+        upper_rel: list[
+            Relevance
+        ] = self.relevance_of_upper_layer.collect_relevances()
+
+        return self_rel + upper_rel
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1192,7 +1198,6 @@ def get_relevance_hidden_and_root(
         x: Input tensor.
         j: Index of which neuron in the final layer to compute the relevance.
         rule: Rule to compute the root point
-        gamma: Scaling factor for DTD gamma rule
 
     Returns:
         A tuple of two tensors: (the relevance of each neuron in the hidden

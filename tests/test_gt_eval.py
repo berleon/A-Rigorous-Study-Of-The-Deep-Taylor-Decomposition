@@ -1,9 +1,16 @@
 # from relation_network import dataset as rel_dataset
+import pytest
 import torch
 
-from lrp_relations import data, gt_eval
+from lrp_relations import data, gt_eval, utils
+
+try:
+    clevr_xai_available = utils.clevr_xai_path().exists()
+except ValueError:
+    clevr_xai_available = False
 
 
+@pytest.mark.skipif(not clevr_xai_available, reason="CLEVR-XAI not available")
 def test_load_clevr_xai_dataset():
     dataset = data.CLEVR_XAI()
     img, question, q_len, answer, idx = dataset[0]
