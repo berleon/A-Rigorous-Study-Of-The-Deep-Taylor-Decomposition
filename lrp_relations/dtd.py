@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import dataclasses
 from typing import Callable, Optional, Union
 
@@ -6,36 +8,8 @@ from torch import nn
 from torch.utils import hooks
 from tqdm.auto import tqdm
 
-
-class record_all_outputs:
-    """A context manager that stores all outputs of all layers."""
-
-    def __init__(self, module: nn.Module):
-        self.module = module
-        self.outputs: dict[nn.Module, list[torch.Tensor]] = {}
-        self.handles: list[hooks.RemovableHandle] = []
-
-    def __enter__(
-        self,
-    ) -> dict[nn.Module, list[torch.Tensor]]:
-        def hook(
-            module: nn.Module, inputs: tuple[torch.Tensor], output: torch.Tensor
-        ) -> None:
-            if module not in self.outputs:
-                self.outputs[module] = []
-
-            self.outputs[module].append(output)
-
-        self.module.apply(
-            lambda module: self.handles.append(
-                module.register_forward_hook(hook)
-            )
-        )
-        return self.outputs
-
-    def __exit__(self, *args):
-        for handle in self.handles:
-            handle.remove()
+# -----------------------------------------------------------------------------
+# Model
 
 
 class LinearReLU(nn.Module):
@@ -72,7 +46,7 @@ class TwoLayerMLP(nn.Module):
         return self.layer2(self.layer1(x))
 
 
-class NLayerMLP(nn.Module):
+class MLP(nn.Module):
     def __init__(
         self, n_layers: int, input_size: int, hidden_size: int, output_size: int
     ):
@@ -119,6 +93,17 @@ class NLayerMLP(nn.Module):
 
     # helper functions
 
+    def get_all_outputs(
+        self,
+        x: torch.Tensor,
+        first: Optional[LinearReLU] = None,
+        last: Optional[LinearReLU] = None,
+    ) -> dict[nn.Module, torch.Tensor]:
+        """Returns a dictionary of all outputs of the network."""
+        with record_all_outputs(self) as outputs:
+            self(x, first, last)
+        return {mod: out[0] for mod, out in outputs.items()}
+
     def is_first_layer(self, layer: LinearReLU) -> bool:
         return layer == self.layers[0]
 
@@ -127,6 +112,8 @@ class NLayerMLP(nn.Module):
 
     def get_next_layer(self, layer: LinearReLU) -> LinearReLU:
         """Returns the next layer in the network."""
+        if self.is_final_layer(layer):
+            raise ValueError("Cannot get next layer of last layer.")
         return self.layers[self.layers.index(layer) + 1]
 
     def get_layer_index(self, layer: LinearReLU) -> int:
@@ -134,6 +121,8 @@ class NLayerMLP(nn.Module):
 
     def get_prev_layer(self, layer: LinearReLU) -> LinearReLU:
         """Returns the previous layer in the network."""
+        if self.is_first_layer(layer):
+            raise ValueError("Cannot get previous layer of first layer.")
         return self.layers[self.layers.index(layer) - 1]
 
 
@@ -143,11 +132,75 @@ def grad_mask_for_logit(output: torch.Tensor, index: int) -> torch.Tensor:
     return mask
 
 
-def root_point_linear(
+# -----------------------------------------------------------------------------
+# Linear Root points
+
+
+class Rule:
+    def __init__(self, name_or_rule: RULE):
+        if isinstance(name_or_rule, str):
+            self.name = name_or_rule
+        else:
+            assert isinstance(name_or_rule, Rule)
+            self.name = name_or_rule.name
+
+        self.is_layer_rule = self.name in ["pinv"]
+
+
+def rule_name(rule: RULE) -> str:
+    if isinstance(rule, str):
+        return rule
+    elif isinstance(rule, Rule):
+        return rule.name
+    else:
+        raise ValueError(f"Unknown rule {rule}")
+
+
+RULE = Union[Rule, str]
+
+
+class GammaRule(Rule):
+    def __init__(self, gamma: float = 1.0):
+        self.gamma = gamma
+        super().__init__("gamma")
+
+
+class rules:
+    pinv = Rule("pinv")
+    z_plus = Rule("z+")
+    w2 = Rule("w2")
+    x = Rule("x")
+    zB = Rule("zB")
+
+    @staticmethod
+    def gamma(gamma: float) -> GammaRule:
+        return GammaRule(gamma=gamma)
+
+
+def is_layer_rule(rule: RULE) -> bool:
+    """Returns whether the rule is a layer rule."""
+    return rule == "pinv"
+
+
+def compute_root_for_layer(
+    x: torch.Tensor,
+    layer: LinearReLU,
+    rule: RULE = "pinv",
+) -> torch.Tensor:
+    w = layer.linear.weight  # [out, in]
+    b = layer.linear.bias  # [out]
+
+    if rule_name(rule) == "pinv":
+        return (torch.linalg.pinv(w) @ b).unsqueeze(0)
+    else:
+        raise ValueError(f"Unknown rule {rule}")
+
+
+def compute_root_for_single_neuron(
     x: torch.Tensor,
     layer: LinearReLU,
     j: int,
-    rule: str = "z+",
+    rule: RULE = "z+",
     gamma: Union[float, torch.Tensor] = 1.0,
 ) -> torch.Tensor:
     """Return the DTD root point.
@@ -170,17 +223,19 @@ def root_point_linear(
     b_j = b[j]
     indicator_w_j_pos = (w_j >= 0).float()  # [1, in]
     #  See 1.3 and 1.4 in DTD Appendix
-    if rule == "z+":
+
+    name = rule_name(rule)
+    if name == "z+":
         v = x * indicator_w_j_pos
-    elif rule == "w2":
+    elif name == "w2":
         v = w_j
-    elif rule == "x":
+    elif name == "x":
         v = x
-    elif rule == "zB":
+    elif name == "zB":
         raise NotImplementedError()
-    elif rule == "0":
+    elif name == "0":
         return 0 * x
-    elif rule in ["gamma", "γ"]:
+    elif name in ["gamma", "γ"]:
         # From: Layer-Wise Relevance Propagation: An Overview
         # https://www.doi.org/10.1007/978-3-030-28954-6_10
         # In section: 10.2.3 under Relation to LRP-0//γ
@@ -190,7 +245,9 @@ def root_point_linear(
         v = x * (1 + gamma * indicator_w_j_pos)
     else:
         raise ValueError()
-    assert torch.allclose(layer.linear(x)[:, j].unsqueeze(1), x @ w_j.t() + b_j)
+    assert torch.allclose(
+        layer.linear(x)[:, j].unsqueeze(1), x @ w_j.t() + b_j, atol=1e-6
+    )
 
     #  This is equation (4) in DTD Appendix
     t = (x @ w_j.t() + b_j).sum(1) / (v @ w_j.t()).sum(1)
@@ -291,7 +348,7 @@ class LayerOptions:
 
 @dataclasses.dataclass
 class PreciseDTD:
-    net: NLayerMLP
+    net: MLP
     explained_class: int
     rule: str = "z+"
     root_max_relevance: float = 1e-4
@@ -509,6 +566,109 @@ class PreciseDTD:
         return torch.stack(roots)
 
 
+@dataclasses.dataclass
+class RecursiveRoot:
+    root: torch.Tensor
+    input: torch.Tensor
+    layer: LinearReLU
+    outputs_of_root: dict[nn.Module, torch.Tensor]
+    outputs_of_input: dict[nn.Module, torch.Tensor]
+    rule: Rule
+    explained_neuron: Optional[int]
+    explained_class: int
+    upper_layers: list[RecursiveRoot]
+
+    def select(self, layer: LinearReLU) -> "RecursiveRoot":
+        """Select the root point of the given layer."""
+        if layer is self.layer:
+            return self
+        else:
+            for upper_layer in self.upper_layers:
+                return upper_layer.select(layer)
+        raise KeyError(f"Layer {layer} not found")
+
+
+@dataclasses.dataclass
+class RecursiveRoots:
+    """Find the roots of a neural network."""
+
+    mlp: MLP
+    explained_class: int
+    rule: Rule
+    gamma: float = 0.1
+
+    def get_root_points(
+        self,
+        layer: LinearReLU,
+        input: torch.Tensor,
+        end_at: LinearReLU,
+    ) -> list[RecursiveRoot]:
+        rule = getattr(layer, "rule", None) or self.rule
+        gamma = getattr(layer, "gamma", None) or self.gamma
+
+        if is_layer_rule(rule):
+            roots = [compute_root_for_layer(input, layer, rule)]
+
+        else:
+            explained_neurons = list(range(layer.out_features))
+            if self.mlp.is_final_layer(layer):
+                explained_neurons = [self.explained_class]
+
+            roots = [
+                compute_root_for_single_neuron(input, layer, j, rule, gamma)
+                for j in explained_neurons
+            ]
+
+        rr = []
+        for j, root in enumerate(roots):
+            if layer != end_at:
+                upper_layers = self.get_root_points(
+                    self.mlp.get_next_layer(layer), root, end_at
+                )
+            else:
+                upper_layers = []
+            outputs_for_root = self.mlp.get_all_outputs(root, first=layer)
+            outputs_for_input = self.mlp.get_all_outputs(input, first=layer)
+            rr.append(
+                RecursiveRoot(
+                    root=root,
+                    outputs_of_root=outputs_for_root,
+                    input=input,
+                    outputs_of_input=outputs_for_input,
+                    rule=Rule(rule),
+                    layer=layer,
+                    explained_neuron=j if is_layer_rule(rule) else None,
+                    explained_class=self.explained_class,
+                    upper_layers=upper_layers,
+                )
+            )
+        return rr
+
+    def run(
+        self,
+        input: torch.Tensor,
+        start_at: Optional[LinearReLU] = None,
+        end_at: Optional[LinearReLU] = None,
+    ) -> list[RecursiveRoot]:
+        """Run the recursive roots algorithm.
+
+        Args:
+            input: The input to the neural network.
+            first_root_layer: The first layer to use as root.
+        """
+        if start_at is None:
+            start_at = self.mlp.layers[0]
+        if self.mlp.is_first_layer(start_at):
+            hidden = input
+        else:
+            hidden = self.mlp(input, last=self.mlp.get_prev_layer(start_at))
+
+        if end_at is None:
+            end_at = self.mlp.layers[-1]
+
+        return self.get_root_points(start_at, hidden, end_at)
+
+
 def get_relevance_hidden(
     net: TwoLayerMLP,
     x: torch.Tensor,
@@ -547,7 +707,7 @@ def get_relevance_hidden_and_root(
 
     # outputs
     hidden = outputs[net.layer1][0]
-    hidden_root = root_point_linear(
+    hidden_root = compute_root_for_single_neuron(
         hidden, net.layer2, j, rule=rule, gamma=gamma
     )
 
@@ -613,6 +773,10 @@ def find_input_root_point(
     return x_line_search[root_idx]
 
 
+# -----------------------------------------------------------------------------
+# Utils
+
+
 def almost_unique(x: torch.Tensor, atol: float = 1e-5) -> torch.Tensor:
     """Returns indices of unique elements in x, with tolerance atol."""
     sort_idx = torch.argsort(torch.norm(x, dim=1))
@@ -628,3 +792,34 @@ def almost_unique(x: torch.Tensor, atol: float = 1e-5) -> torch.Tensor:
     unique_mask = x.new_zeros(size=(len(x),), dtype=torch.long)
     unique_mask[sort_idx] = unique
     return unique_mask
+
+
+class record_all_outputs:
+    """A context manager that stores all outputs of all layers."""
+
+    def __init__(self, module: nn.Module):
+        self.module = module
+        self.outputs: dict[nn.Module, list[torch.Tensor]] = {}
+        self.handles: list[hooks.RemovableHandle] = []
+
+    def __enter__(
+        self,
+    ) -> dict[nn.Module, list[torch.Tensor]]:
+        def hook(
+            module: nn.Module, inputs: tuple[torch.Tensor], output: torch.Tensor
+        ) -> None:
+            if module not in self.outputs:
+                self.outputs[module] = []
+
+            self.outputs[module].append(output)
+
+        self.module.apply(
+            lambda module: self.handles.append(
+                module.register_forward_hook(hook)
+            )
+        )
+        return self.outputs
+
+    def __exit__(self, *args):
+        for handle in self.handles:
+            handle.remove()

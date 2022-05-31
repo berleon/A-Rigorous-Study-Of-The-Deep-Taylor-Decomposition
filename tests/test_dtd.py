@@ -11,7 +11,9 @@ def test_dtd_root():
     x = (0.25 * torch.randn(2, 3, requires_grad=True) + 1).clamp(min=0)
 
     for rule in ["0", "z+", "w2", "gamma"]:
-        x_root = dtd.root_point_linear(x, net.layer1, idx, rule=rule)
+        x_root = dtd.compute_root_for_single_neuron(
+            x, net.layer1, idx, rule=rule
+        )
 
         x_root.shape, x.shape
         print("x", x)
@@ -49,7 +51,7 @@ def test_dtd_input_root():
             logit_x = net(x)
 
         rel_hidden = relevance_fn(net, x)
-        hidden_root = dtd.root_point_linear(
+        hidden_root = dtd.compute_root_for_single_neuron(
             x_outs[net.layer1][0], net.layer2, 0, rule=rule, gamma=1000
         )
         print("hidden_root", hidden_root)
@@ -86,7 +88,7 @@ def test_dtd_precise():
     torch.manual_seed(0)
 
     x = torch.rand(1, 5)
-    net = dtd.NLayerMLP(
+    net = dtd.MLP(
         n_layers=3,
         input_size=5,
         hidden_size=10,
@@ -121,7 +123,7 @@ def test_dtd_precise_explain():
     torch.manual_seed(0)
 
     x = torch.rand(1, 5)
-    net = dtd.NLayerMLP(
+    net = dtd.MLP(
         n_layers=3,
         input_size=5,
         hidden_size=10,

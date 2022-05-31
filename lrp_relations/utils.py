@@ -3,8 +3,10 @@ import socket
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import savethat
 import toml
+import torch
 from savethat import env as env_mod
 
 
@@ -57,3 +59,7 @@ def sha256sum(filename: Path) -> str:
         while n := f.readinto(mv):
             h.update(mv[:n])
     return h.hexdigest()
+
+
+def to_np(x: torch.Tensor) -> np.ndarray:
+    return x.detach().cpu().numpy()

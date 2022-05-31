@@ -128,7 +128,7 @@ class SampleGrid(savethat.Node[SampleGridArgs, SampleGridResult]):
     def construct_model(self) -> nn.Module:
         torch.manual_seed(2)
 
-        net = dtd.NLayerMLP(
+        net = dtd.MLP(
             n_layers=3,
             input_size=2,
             hidden_size=30,

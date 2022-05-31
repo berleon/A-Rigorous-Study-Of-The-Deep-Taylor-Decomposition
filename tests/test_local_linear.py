@@ -1,13 +1,13 @@
 import torch
-from lrp_relations import local_linear
-from lrp_relations import dtd
+
+from lrp_relations import dtd, local_linear
 
 
 def test_local_linear():
 
     torch.manual_seed(0)
     x = torch.rand(1, 5).repeat(40, 1)
-    mlp = dtd.NLayerMLP(5, 5, 20, 1)
+    mlp = dtd.MLP(5, 5, 20, 1)
 
     print(mlp(x))
     assert (mlp(x) > 0).all()
