@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import abc
 import dataclasses
 import itertools
 from typing import Callable, Generic, Optional, TypeVar, Union
@@ -46,6 +47,13 @@ class TwoLayerMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layer2(self.layer1(x))
+
+
+class NetworkOutput(nn.Module):
+    """Used as a marker for the output of a network."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
 
 
 class MLP(nn.Module):
@@ -129,6 +137,13 @@ class MLP(nn.Module):
 
     def is_final_layer(self, layer: LinearReLU) -> bool:
         return layer == self.layers[-1]
+
+    def get_next_layer_or_output(
+        self, layer: LinearReLU
+    ) -> Union[LinearReLU, NetworkOutput]:
+        if self.is_final_layer(layer):
+            return NetworkOutput()
+        return self.layers[self.layers.index(layer) + 1]
 
     def get_next_layer(self, layer: LinearReLU) -> LinearReLU:
         """Returns the next layer in the network."""
@@ -293,6 +308,710 @@ def compute_root_for_single_neuron(
 
     root_point = x - t.unsqueeze(1) * v
     return root_point
+
+
+@dataclasses.dataclass(frozen=True)
+class RecursiveRoot:
+    root: torch.Tensor
+    input: torch.Tensor
+    layer: LinearReLU
+    outputs_of_root: dict[nn.Module, torch.Tensor]
+    outputs_of_input: dict[nn.Module, torch.Tensor]
+    rule: Rule
+    explained_neuron: Union[int, slice]
+    explained_logit: int
+    upper_layers: list[RecursiveRoot]
+
+    def select(self, layer: LinearReLU) -> "RecursiveRoot":
+        """Select the root point of the given layer."""
+        if layer is self.layer:
+            return self
+        else:
+            for upper_layer in self.upper_layers:
+                return upper_layer.select(layer)
+        raise KeyError(f"Layer {layer} not found")
+
+
+@dataclasses.dataclass(frozen=True)
+class RootPoint:
+    root: torch.Tensor
+    input: torch.Tensor
+    layer: LinearReLU
+    rule: Rule
+    explained_neuron: Union[int, slice]
+    relevance: Optional[torch.Tensor]
+
+
+class RootFinder(metaclass=abc.ABCMeta):
+    @abc.abstractmethod
+    def get_root_points_for_layer(
+        self,
+        for_input_to_layer: LinearReLU,
+        input: torch.Tensor,
+        relevance_fn: RelevanceFn,
+    ) -> list[RootPoint]:
+        """Return the root points for the given layer.
+
+        Args:
+            for_input_to_layer: The layer to find the root points of.
+            input: The input to the layer.
+            relevance_fn: A function that maps the output of the layer to a
+                relevance score.
+        """
+
+
+@dataclasses.dataclass(frozen=True)
+class RecursiveRoots(RootFinder):
+    """Find the roots of a neural network."""
+
+    mlp: MLP
+    explained_output: int
+    rule: Rule
+
+    def __repr__(self) -> str:
+        return (
+            f"RecursiveRoots(explained_output={self.explained_output},"
+            f" rule={self.rule})"
+        )
+
+    def get_root_points_for_layer(
+        self,
+        layer: LinearReLU,
+        input: torch.Tensor,
+        relevance_fn: RelevanceFn[REL],
+    ) -> list[RootPoint]:
+
+        rel = relevance_fn(input)
+        relevance = rel.relevance
+
+        rule = getattr(layer, "rule", None) or self.rule
+        if is_layer_rule(rule):
+            roots: list[Optional[torch.Tensor]] = [
+                compute_root_for_layer(input, layer, rule, relevance)
+            ]
+        else:
+            explained_neurons = list(range(layer.out_features))
+            if self.mlp.is_final_layer(layer):
+                explained_neurons = [self.explained_output]
+
+            roots = [
+                compute_root_for_single_neuron(input, layer, j, rule, relevance)
+                for j in explained_neurons
+            ]
+
+        return [
+            RootPoint(root, input, layer, rule, j, relevance)
+            for j, root in enumerate(roots)
+            if root is not None
+        ]
+
+    def get_root_points(
+        self,
+        layer: LinearReLU,
+        input: torch.Tensor,
+        end_at: LinearReLU,
+    ) -> list[RecursiveRoot]:
+        rule = getattr(layer, "rule", None) or self.rule
+
+        roots: list[Optional[torch.Tensor]]
+        if is_layer_rule(rule):
+            roots = [compute_root_for_layer(input, layer, rule)]
+
+        else:
+            explained_neurons = list(range(layer.out_features))
+            if self.mlp.is_final_layer(layer):
+                explained_neurons = [self.explained_output]
+
+            roots = [
+                compute_root_for_single_neuron(input, layer, j, rule)
+                for j in explained_neurons
+            ]
+
+        rr = []
+        for j, root in enumerate(roots):
+            if root is None:
+                continue
+
+            if layer != end_at:
+                upper_layers = self.get_root_points(
+                    self.mlp.get_next_layer(layer),
+                    root,
+                    end_at,
+                )
+            else:
+                upper_layers = []
+            outputs_for_root = self.mlp.get_all_outputs(root, first=layer)
+            outputs_for_input = self.mlp.get_all_outputs(input, first=layer)
+            rr.append(
+                RecursiveRoot(
+                    root=root,
+                    outputs_of_root=outputs_for_root,
+                    input=input,
+                    outputs_of_input=outputs_for_input,
+                    rule=Rule(rule),
+                    layer=layer,
+                    explained_neuron=j if is_layer_rule(rule) else np.s_[:],
+                    explained_logit=self.explained_output,
+                    upper_layers=upper_layers,
+                )
+            )
+        if not rr:
+            raise ValueError("Could not find any suitable root point!")
+        return rr
+
+    def find_roots(
+        self,
+        input: torch.Tensor,
+        start_at: Optional[LinearReLU] = None,
+        end_at: Optional[LinearReLU] = None,
+        is_hidden: bool = False,
+    ) -> list[RecursiveRoot]:
+        """Run the recursive roots algorithm.
+
+        Args:
+            input: The input to the neural network.
+            start_at: The layer to start with computing roots.
+            end_at: The last layer to compute roots for.
+            is_hidden: Whether the input is the hidden input to the layer
+                `start_at` or not.
+
+        Returns:
+            A list of root points.
+        """
+        if start_at is None:
+            start_at = self.mlp.layers[0]
+
+        if self.mlp.is_first_layer(start_at) or is_hidden:
+            hidden = input
+        else:
+            hidden = self.mlp(input, last=self.mlp.get_prev_layer(start_at))
+
+        if end_at is None:
+            end_at = self.mlp.layers[-1]
+        return self.get_root_points(start_at, hidden, end_at)
+
+
+# ------------------------------------------------------------------------------
+# Recursive Computation of Relevances
+
+
+# def view_of_relevance_fn(
+#     mlp: MLP,
+#     start_at: LinearReLU,
+#     explained_neuron: int,
+#     explained_logit: int,
+#     relevance_fn: LinearReLU,
+# ) -> Callable[[torch.Tensor], torch.Tensor]:
+#     def relevance_fn_view(root: torch.Tensor) -> torch.Tensor:
+#         output = mlp(root, first=start_at)
+#         rel = relevance_fn(output[:, explained_logit].unsqueeze(1))
+#         return rel[:, explained_neuron].unsqueeze(1)
+#
+#     return relevance_fn_view
+#
+
+
+def ensure_2d(x: torch.Tensor) -> torch.Tensor:
+    """Eventually unsqueeze the tensor to a 2D tensor."""
+    if x.ndim == 1:
+        return x.unsqueeze(1)
+    return x
+
+
+NEURON = Union[int, slice]
+
+REL = TypeVar("REL", bound="Relevance")
+REL_FN = TypeVar("REL_FN", bound="RelevanceFn")
+
+
+@dataclasses.dataclass(frozen=True)
+class Relevance(Generic[REL_FN]):
+    """A relevance score.
+
+    Parameters:
+        relevance: The relevance score.
+        computed_with_fn: The relevance function that was used to compute the
+            relevance.
+
+    """
+
+    relevance: torch.Tensor
+    computed_with_fn: REL_FN
+
+    def collect_relevances(self) -> list[Relevance]:
+        return [self]
+
+
+NETWORK_LAYER = Union[LinearReLU, NetworkOutput]
+
+
+@dataclasses.dataclass(frozen=True)
+class RelevanceFn(Generic[REL]):
+    mlp: MLP
+
+    @property
+    def input_layer(self) -> NETWORK_LAYER:
+        """The input layer."""
+        raise NotImplementedError()
+
+    @property
+    def output_layer(self) -> NETWORK_LAYER:
+        raise NotImplementedError()
+
+    def __call__(self, input: torch.Tensor) -> REL:
+        raise NotImplementedError()
+
+
+@dataclasses.dataclass(frozen=True)
+class ConstantRelFn(RelevanceFn[Relevance]):
+    """A constant relevance function."""
+
+    relevance: torch.Tensor
+    layer: NETWORK_LAYER
+
+    @property
+    def input_layer(self) -> NETWORK_LAYER:
+        return self.layer
+
+    def __call__(self, input: torch.Tensor) -> Relevance:
+        del input
+        return Relevance(self.relevance, self)
+
+
+@dataclasses.dataclass(frozen=True)
+class OutputRel(Relevance[REL_FN], Generic[REL_FN]):
+    def __repr__(self) -> str:
+        return f"OutputRel(relevance={self.relevance})"
+
+
+@dataclasses.dataclass(frozen=True)
+class OutputRelFn(RelevanceFn[OutputRel]):
+    mlp: MLP
+    explained_output: NEURON
+
+    @property
+    def input_layer(self) -> LinearReLU:
+        return self.mlp.layers[-1]
+
+    def __repr__(self) -> str:
+        return f"OutputRelFn(explained_output={self.explained_output})"
+
+    def __call__(self, input: torch.Tensor) -> "OutputRel[OutputRelFn]":
+        rel = input[:, self.explained_output]
+        return OutputRel(ensure_2d(rel), self)
+
+
+@dataclasses.dataclass(frozen=True)
+class DecomposedRel(Relevance):
+    roots: list[RecursiveRoot]
+    relevance_of_from_layer: torch.Tensor
+    relevance: torch.Tensor
+    roots_relevance: list[torch.Tensor]
+    relevance_info_from: list[Relevance]
+
+    def __repr__(self) -> str:
+        return (
+            f"DecomposedRel(#roots={len(self.roots)}, "
+            f"relevance_of_from_layer={self.relevance_of_from_layer}, "
+            f"relevance={self.relevance}, ...)"
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class StabilizeGradient:
+    noise_std: float = 1e-6
+    max_tries: int = 3
+
+
+@dataclasses.dataclass(frozen=True)
+class DecomposedRelFn(RelevanceFn[DecomposedRel]):
+    mlp: MLP
+    to_input_of: LinearReLU
+    from_output_of: LinearReLU
+    relevance_fn: RelevanceFn
+    root_finder: RecursiveRoots
+    check_nans: bool = True
+    stabilize_grad: Optional[StabilizeGradient] = StabilizeGradient()
+
+    def __repr__(self) -> str:
+        to_idx = self.mlp.layers.index(self.to_input_of)
+        from_idx = self.mlp.layers.index(self.from_output_of)
+
+        return (
+            f"DecomposedRelFn(to_input_of={to_idx}, "
+            f"from_output_of={from_idx}, "
+            f"rule={self.root_finder.rule.name}, ...)"
+        )
+
+    def __call__(self, input: torch.Tensor) -> DecomposedRel:
+        def get_grad_and_rel(
+            root: RecursiveRoot,
+        ) -> tuple[torch.Tensor, torch.Tensor, Relevance]:
+            output = self.mlp(root.root, self.to_input_of, self.from_output_of)
+            rel_info_from = self.relevance_fn(output)
+            rel_from = rel_info_from.relevance
+            rel_from = ensure_2d(rel_from[:, root.explained_neuron])
+
+            (grad_root,) = torch.autograd.grad(
+                rel_from.sum(), root.root, retain_graph=True
+            )
+            return grad_root, rel_from, rel_info_from
+
+        input.requires_grad_(True)
+
+        to_idx = self.mlp.get_layer_index(self.to_input_of)
+        from_idx = self.mlp.get_layer_index(self.from_output_of)
+
+        roots = self.root_finder.find_roots(
+            input,
+            start_at=self.to_input_of,
+            end_at=self.to_input_of,
+            is_hidden=True,
+        )
+        roots_relevance = []
+        rel_infos = []
+        for root in roots:
+            root_point = root.root.clone()
+            root.root.requires_grad_(True)
+            for i in itertools.count():
+                if i == 0 and self.stabilize_grad is not None:
+                    noise_std = self.stabilize_grad.noise_std
+                    noise = noise_std * torch.randn_like(root.root)
+                    root.root[:] = root_point + noise
+                grad_root, rel_from, rel_info_from = get_grad_and_rel(root)
+
+                has_nans = not torch.isfinite(grad_root).all()
+                grad_zero = grad_root.abs().sum() < 1e-7
+                if self.stabilize_grad is not None and (has_nans or grad_zero):
+                    if i + 1 <= self.stabilize_grad.max_tries:
+                        continue
+
+                if self.check_nans and not torch.isfinite(grad_root).all():
+                    raise ValueError("Gradient of root is not finite")
+                break
+
+            rel_j = rel_from + grad_root * (input - root.root)
+            roots_relevance.append(rel_j)
+            rel_infos.append(rel_info_from)
+
+        print(f"Finished decomposing: {to_idx} <- {from_idx}")
+        total_rel = torch.stack(roots_relevance, dim=0).sum(0)
+        return DecomposedRel(
+            roots=roots,
+            relevance_of_from_layer=rel_from,
+            relevance=total_rel,
+            roots_relevance=roots_relevance,
+            relevance_info_from=rel_infos,
+            computed_with_fn=self,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class TrainFreeRel(Relevance):
+    roots: list[RootPoint]
+    grad_roots: list[torch.Tensor]
+    roots_relevance: list[torch.Tensor]
+    relevance_of_upper_layer: Relevance
+    relevance: torch.Tensor
+
+    def __repr__(self) -> str:
+        return (
+            f"TrainFreeRel(#roots={len(self.roots)}, "
+            f"relevance_of_upper_layer={self.relevance_of_upper_layer}, "
+            f"relevance={self.relevance}, ...)"
+        )
+
+    def collect_relevances(self) -> list[Relevance]:
+        self_rel: list[Relevance] = [self]
+        upper_rel: list[
+            Relevance
+        ] = self.relevance_of_upper_layer.collect_relevances()
+
+        return self_rel + upper_rel
+
+
+@dataclasses.dataclass(frozen=True)
+class TrainFreeFn(RelevanceFn[TrainFreeRel]):
+    mlp: MLP
+    to_input_of: LinearReLU
+    from_output_of: LinearReLU
+    relevance_fn: RelevanceFn
+    root_finder: RootFinder
+    check_nans: bool = True
+    stabilize_grad: Optional[StabilizeGradient] = StabilizeGradient()
+
+    def __repr__(self) -> str:
+        to_idx = self.mlp.layers.index(self.to_input_of)
+        from_idx = self.mlp.layers.index(self.from_output_of)
+
+        return (
+            f"TrainFreeFn(to_input_of={to_idx}, "
+            f"from_output_of={from_idx}, "
+            f"rule={self.root_finder}, ...)"
+        )
+
+    def __call__(self, input: torch.Tensor) -> TrainFreeRel:
+        to_idx = self.mlp.get_layer_index(self.to_input_of)
+        from_idx = self.mlp.get_layer_index(self.from_output_of)
+
+        # Approximation: use input instead of root
+        rel_info_from = self.relevance_fn(self.to_input_of(input))
+        rel_from = rel_info_from.relevance
+
+        const_rel = ConstantRelFn(
+            self.mlp,
+            rel_from,
+            self.mlp.get_next_layer_or_output(self.to_input_of),
+        )
+        roots = self.root_finder.get_root_points_for_layer(
+            self.to_input_of,
+            input,
+            const_rel,
+        )
+        roots_relevance = []
+        rel_infos = []
+        grad_roots = []
+
+        for root in roots:
+            root.root.requires_grad_(True)
+
+            # To ensure gradient is not zero, only derive linear layer
+            output = self.to_input_of.linear(root.root)
+
+            output_sel = ensure_2d(output[:, root.explained_neuron])
+
+            (grad_root,) = torch.autograd.grad(
+                output_sel,
+                root.root,
+                # grad_outputs=ensure_2d(rel_from[:, root.explained_neuron]),
+                grad_outputs=torch.ones_like(output_sel),
+            )
+
+            rel_j = grad_root * (input - root.root)
+            assert torch.allclose(
+                rel_j.sum(), rel_from[0, root.explained_neuron]
+            )
+            roots_relevance.append(rel_j)
+            rel_infos.append(rel_info_from)
+            grad_roots.append(grad_root)
+
+        print(f"Finished decomposing: {to_idx} <- {from_idx}")
+        total_rel = torch.stack(roots_relevance, dim=0).sum(0)
+        # assert (total_rel >= 0).all()
+        return TrainFreeRel(
+            roots=roots,
+            grad_roots=grad_roots,
+            roots_relevance=roots_relevance,
+            relevance_of_upper_layer=rel_info_from,
+            relevance=total_rel,
+            computed_with_fn=self,
+        )
+
+
+def get_decompose_relevance_fns(
+    mlp: MLP,
+    explained_output: int,
+    rule: Rule,
+    root_finder: Optional[RecursiveRoots] = None,
+    decomposition: str = "full",
+) -> list[RelevanceFn]:
+    rel_fns: list[RelevanceFn] = [
+        OutputRelFn(mlp=mlp, explained_output=explained_output)
+    ]
+    if root_finder is None:
+        root_finder = RecursiveRoots(
+            mlp=mlp, explained_output=explained_output, rule=rule
+        )
+
+    for layer in reversed(mlp.layers[:]):
+
+        if decomposition == "full":
+            rel_fns.append(
+                DecomposedRelFn(
+                    mlp=mlp,
+                    to_input_of=layer,
+                    from_output_of=layer,
+                    relevance_fn=rel_fns[-1],
+                    root_finder=root_finder,
+                )
+            )
+        elif decomposition == "train_free":
+            rel_fns.append(
+                TrainFreeFn(
+                    mlp=mlp,
+                    to_input_of=layer,
+                    from_output_of=layer,
+                    relevance_fn=rel_fns[-1],
+                    root_finder=root_finder,
+                )
+            )
+
+    return rel_fns
+
+
+# ------------------------------------------------------------------------------
+
+
+def get_relevance_hidden(
+    net: TwoLayerMLP,
+    x: torch.Tensor,
+    j: int = 0,
+    rule: RULE = "z+",
+) -> torch.Tensor:
+    return get_relevance_hidden_and_root(net, x, j, rule)[0]
+
+
+def get_relevance_hidden_and_root(
+    net: TwoLayerMLP,
+    x: torch.Tensor,
+    j: int = 0,
+    rule: RULE = "z+",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the relevance of each neuron in the hidden layer and the
+    corresponding root point.
+
+    This applies the given DTD rule to the final layer.
+
+    Args:
+        net: TwoLayerMLP network.
+        x: Input tensor.
+        j: Index of which neuron in the final layer to compute the relevance.
+        rule: Rule to compute the root point
+
+    Returns:
+        A tuple of two tensors: (the relevance of each neuron in the hidden
+            layer, the corresponding root point).
+    """
+    with record_all_outputs(net) as outputs:
+        net(x)
+
+    # outputs
+    hidden = outputs[net.layer1][0]
+    hidden_root = compute_root_for_single_neuron(
+        hidden, net.layer2, j, rule=rule
+    )
+    assert hidden_root is not None
+    assert torch.isnan(hidden_root).sum() == 0
+
+    output_root = net.layer2.linear(hidden_root)
+
+    assert output_root.isnan().sum() == 0
+    (rel_grad,) = torch.autograd.grad(
+        output_root,
+        hidden_root,
+        grad_outputs=torch.ones_like(output_root),
+        retain_graph=True,
+    )
+    assert rel_grad.isnan().sum() == 0
+    rel_hidden = rel_grad * (hidden - hidden_root)
+    return rel_hidden, hidden_root
+
+
+def find_input_root_point(
+    net: TwoLayerMLP,
+    x: torch.Tensor,
+    j: int,
+    relevance_fn: Callable[[TwoLayerMLP, torch.Tensor], torch.Tensor],
+    n_samples: int = 1_000,
+    plot: bool = False,
+) -> torch.Tensor:
+    """Return the root point of the input layer.
+
+    Args:
+        net: TwoLayerMLP network.
+        x: Input tensor.
+        j: Index of which neuron in the hidden layer to compute the relevance.
+        relevance_fn: Function to compute the relevance of each neuron in the
+            hidden layer.
+        n_samples: Number of samples to find the root point.
+
+    Returns:
+        The root point of the input layer.
+    """
+
+    assert x.size(0) == 1
+    length = 3 * torch.randn(n_samples, 1) + 5
+    x_search = x + torch.randn(n_samples, x.size(1)) * length
+
+    rel_hidden_search = relevance_fn(net, x_search)
+
+    idx = rel_hidden_search[:, j].abs().argmin()
+
+    steps = torch.linspace(-0.3, 1.05, 100).view(-1, 1)
+
+    smallest_x = x_search[idx].unsqueeze(0)
+    x_line_search = smallest_x + steps * (x - smallest_x)
+
+    rel_hidden_line_search = relevance_fn(net, x_line_search)
+
+    if plot:
+        import matplotlib.pyplot as plt
+
+        plt.plot(rel_hidden_line_search.detach().cpu().numpy()[:, j])
+        plt.show()
+    root_idx = (rel_hidden_line_search[:, j] <= 1e-2).nonzero().max()
+    return x_line_search[root_idx]
+
+
+# -----------------------------------------------------------------------------
+# Utils
+
+
+def almost_unique(x: torch.Tensor, atol: float = 1e-5) -> torch.Tensor:
+    """Returns indices of unique elements in x, with tolerance atol."""
+    sort_idx = torch.argsort(torch.norm(x, dim=1))
+    x_sorted = x[sort_idx]
+
+    dist = torch.pairwise_distance(x_sorted[:-1], x_sorted[1:])
+
+    below_atol = (dist > atol).long()
+
+    unique = dist.new_zeros(dist.shape[0] + 1, dtype=torch.long)
+    unique[1:] = below_atol.cumsum(dim=0)
+
+    unique_mask = x.new_zeros(size=(len(x),), dtype=torch.long)
+    unique_mask[sort_idx] = unique
+    return unique_mask
+
+
+class record_all_outputs:
+    """A context manager that stores all outputs of all layers."""
+
+    def __init__(self, module: nn.Module):
+        self.module = module
+        self.outputs: dict[nn.Module, list[torch.Tensor]] = {}
+        self.handles: list[hooks.RemovableHandle] = []
+
+    def __enter__(
+        self,
+    ) -> dict[nn.Module, list[torch.Tensor]]:
+        def hook(
+            module: nn.Module, inputs: tuple[torch.Tensor], output: torch.Tensor
+        ) -> None:
+            if module not in self.outputs:
+                self.outputs[module] = []
+
+            self.outputs[module].append(output)
+
+        self.module.apply(
+            lambda module: self.handles.append(
+                module.register_forward_hook(hook)
+            )
+        )
+        return self.outputs
+
+    def __exit__(self, *args):
+        for handle in self.handles:
+            handle.remove()
+
+
+# -----------------------------------------------------------------------------
+# Old code to randomly sample root points
+#
+# Problems:
+#    * The sampled roots will not have the same gradient
+#    * Not specific enough --> might not return roots
+#
 
 
 @dataclasses.dataclass
@@ -597,730 +1316,3 @@ class PreciseDTD:
             idx = torch.stack(distances_to_input).argmin()
             roots.append(closest_relu_candidates[idx])
         return torch.stack(roots)
-
-
-@dataclasses.dataclass(frozen=True)
-class RecursiveRoot:
-    root: torch.Tensor
-    input: torch.Tensor
-    layer: LinearReLU
-    outputs_of_root: dict[nn.Module, torch.Tensor]
-    outputs_of_input: dict[nn.Module, torch.Tensor]
-    rule: Rule
-    explained_neuron: Union[int, slice]
-    explained_logit: int
-    upper_layers: list[RecursiveRoot]
-
-    def select(self, layer: LinearReLU) -> "RecursiveRoot":
-        """Select the root point of the given layer."""
-        if layer is self.layer:
-            return self
-        else:
-            for upper_layer in self.upper_layers:
-                return upper_layer.select(layer)
-        raise KeyError(f"Layer {layer} not found")
-
-
-@dataclasses.dataclass(frozen=True)
-class RootPoint:
-    root: torch.Tensor
-    input: torch.Tensor
-    layer: LinearReLU
-    rule: Rule
-    explained_neuron: Union[int, slice]
-    relevance: Optional[torch.Tensor]
-
-
-@dataclasses.dataclass(frozen=True)
-class RecursiveRoots:
-    """Find the roots of a neural network."""
-
-    mlp: MLP
-    explained_output: int
-    rule: Rule
-
-    def get_root_points_for_layer(
-        self,
-        layer: LinearReLU,
-        input: torch.Tensor,
-        relevance: Optional[torch.Tensor],
-    ) -> list[RootPoint]:
-        rule = getattr(layer, "rule", None) or self.rule
-        if is_layer_rule(rule):
-            roots: list[Optional[torch.Tensor]] = [
-                compute_root_for_layer(input, layer, rule, relevance)
-            ]
-        else:
-            explained_neurons = list(range(layer.out_features))
-            if self.mlp.is_final_layer(layer):
-                explained_neurons = [self.explained_output]
-
-            roots = [
-                compute_root_for_single_neuron(input, layer, j, rule, relevance)
-                for j in explained_neurons
-            ]
-
-        return [
-            RootPoint(root, input, layer, rule, j, relevance)
-            for j, root in enumerate(roots)
-            if root is not None
-        ]
-
-    def get_root_points(
-        self,
-        layer: LinearReLU,
-        input: torch.Tensor,
-        end_at: LinearReLU,
-    ) -> list[RecursiveRoot]:
-        rule = getattr(layer, "rule", None) or self.rule
-
-        roots: list[Optional[torch.Tensor]]
-        if is_layer_rule(rule):
-            roots = [compute_root_for_layer(input, layer, rule)]
-
-        else:
-            explained_neurons = list(range(layer.out_features))
-            if self.mlp.is_final_layer(layer):
-                explained_neurons = [self.explained_output]
-
-            roots = [
-                compute_root_for_single_neuron(input, layer, j, rule)
-                for j in explained_neurons
-            ]
-
-        rr = []
-        for j, root in enumerate(roots):
-            if root is None:
-                continue
-
-            if layer != end_at:
-                upper_layers = self.get_root_points(
-                    self.mlp.get_next_layer(layer), root, end_at
-                )
-            else:
-                upper_layers = []
-            outputs_for_root = self.mlp.get_all_outputs(root, first=layer)
-            outputs_for_input = self.mlp.get_all_outputs(input, first=layer)
-            rr.append(
-                RecursiveRoot(
-                    root=root,
-                    outputs_of_root=outputs_for_root,
-                    input=input,
-                    outputs_of_input=outputs_for_input,
-                    rule=Rule(rule),
-                    layer=layer,
-                    explained_neuron=j if is_layer_rule(rule) else np.s_[:],
-                    explained_logit=self.explained_output,
-                    upper_layers=upper_layers,
-                )
-            )
-        if not rr:
-            raise ValueError("Could not find any suitable root point!")
-        return rr
-
-    def find_roots(
-        self,
-        input: torch.Tensor,
-        start_at: Optional[LinearReLU] = None,
-        end_at: Optional[LinearReLU] = None,
-        is_hidden: bool = False,
-    ) -> list[RecursiveRoot]:
-        """Run the recursive roots algorithm.
-
-        Args:
-            input: The input to the neural network.
-            start_at: The layer to start with computing roots.
-            end_at: The last layer to compute roots for.
-            is_hidden: Whether the input is the hidden input to the layer
-                `start_at` or not.
-
-        Returns:
-            A list of root points.
-        """
-        if start_at is None:
-            start_at = self.mlp.layers[0]
-
-        if self.mlp.is_first_layer(start_at) or is_hidden:
-            hidden = input
-        else:
-            hidden = self.mlp(input, last=self.mlp.get_prev_layer(start_at))
-
-        if end_at is None:
-            end_at = self.mlp.layers[-1]
-        return self.get_root_points(start_at, hidden, end_at)
-
-
-# ------------------------------------------------------------------------------
-# Recursive Computation of Relevances
-
-
-# def view_of_relevance_fn(
-#     mlp: MLP,
-#     start_at: LinearReLU,
-#     explained_neuron: int,
-#     explained_logit: int,
-#     relevance_fn: LinearReLU,
-# ) -> Callable[[torch.Tensor], torch.Tensor]:
-#     def relevance_fn_view(root: torch.Tensor) -> torch.Tensor:
-#         output = mlp(root, first=start_at)
-#         rel = relevance_fn(output[:, explained_logit].unsqueeze(1))
-#         return rel[:, explained_neuron].unsqueeze(1)
-#
-#     return relevance_fn_view
-#
-
-
-def ensure_2d(x: torch.Tensor) -> torch.Tensor:
-    """Eventually unsqueeze the tensor to a 2D tensor."""
-    if x.ndim == 1:
-        return x.unsqueeze(1)
-    return x
-
-
-NEURON = Union[int, slice]
-
-REL = TypeVar("REL", bound="Relevance")
-
-
-@dataclasses.dataclass(frozen=True)
-class Relevance:
-    relevance: torch.Tensor
-
-    def collect_relevances(self) -> list[Relevance]:
-        return [self]
-
-
-@dataclasses.dataclass(frozen=True)
-class RelevanceFn(Generic[REL]):
-    mlp: MLP
-
-    @property
-    def input_layer(self) -> LinearReLU:
-        """The input layer."""
-        raise NotImplementedError()
-
-    def __call__(self, input: torch.Tensor) -> REL:
-        raise NotImplementedError()
-
-
-@dataclasses.dataclass(frozen=True)
-class OutputRel(Relevance):
-    relevance_fn: RelevanceFn
-
-    def __repr__(self) -> str:
-        return f"OutputRel(relevance={self.relevance})"
-
-
-@dataclasses.dataclass(frozen=True)
-class OutputRelFn(RelevanceFn[OutputRel]):
-    mlp: MLP
-    explained_output: NEURON
-
-    @property
-    def input_layer(self) -> LinearReLU:
-        return self.mlp.layers[-1]
-
-    def __repr__(self) -> str:
-        return f"OutputRelFn(explained_output={self.explained_output})"
-
-    def __call__(self, input: torch.Tensor) -> OutputRel:
-        rel = input[:, self.explained_output]
-        return OutputRel(ensure_2d(rel), self)
-
-
-@dataclasses.dataclass(frozen=True)
-class DecomposedRel(Relevance):
-    roots: list[RecursiveRoot]
-    relevance_of_from_layer: torch.Tensor
-    relevance: torch.Tensor
-    roots_relevance: list[torch.Tensor]
-    relevance_info_from: list[Relevance]
-    relevance_fn: RelevanceFn
-
-    def __repr__(self) -> str:
-        return (
-            f"DecomposedRel(#roots={len(self.roots)}, "
-            f"relevance_of_from_layer={self.relevance_of_from_layer}, "
-            f"relevance={self.relevance}, ...)"
-        )
-
-
-@dataclasses.dataclass(frozen=True)
-class StabilizeGradient:
-    noise_std: float = 1e-6
-    max_tries: int = 3
-
-
-@dataclasses.dataclass(frozen=True)
-class DecomposedRelFn(RelevanceFn[DecomposedRel]):
-    mlp: MLP
-    to_input_of: LinearReLU
-    from_output_of: LinearReLU
-    relevance_fn: RelevanceFn
-    root_finder: RecursiveRoots
-    check_nans: bool = True
-    stabilize_grad: Optional[StabilizeGradient] = StabilizeGradient()
-
-    def __repr__(self) -> str:
-        to_idx = self.mlp.layers.index(self.to_input_of)
-        from_idx = self.mlp.layers.index(self.from_output_of)
-
-        return (
-            f"DecomposedRelFn(to_input_of={to_idx}, "
-            f"from_output_of={from_idx}, "
-            f"rule={self.root_finder.rule.name}, ...)"
-        )
-
-    def __call__(self, input: torch.Tensor) -> DecomposedRel:
-        def get_grad_and_rel(
-            root: RecursiveRoot,
-        ) -> tuple[torch.Tensor, torch.Tensor, Relevance]:
-            output = self.mlp(root.root, self.to_input_of, self.from_output_of)
-            rel_info_from = self.relevance_fn(output)
-            rel_from = rel_info_from.relevance
-            rel_from = ensure_2d(rel_from[:, root.explained_neuron])
-
-            (grad_root,) = torch.autograd.grad(
-                rel_from.sum(), root.root, retain_graph=True
-            )
-            return grad_root, rel_from, rel_info_from
-
-        input.requires_grad_(True)
-
-        to_idx = self.mlp.get_layer_index(self.to_input_of)
-        from_idx = self.mlp.get_layer_index(self.from_output_of)
-
-        roots = self.root_finder.find_roots(
-            input,
-            start_at=self.to_input_of,
-            end_at=self.to_input_of,
-            is_hidden=True,
-        )
-        roots_relevance = []
-        rel_infos = []
-        for root in roots:
-            root_point = root.root.clone()
-            root.root.requires_grad_(True)
-            for i in itertools.count():
-                if i == 0 and self.stabilize_grad is not None:
-                    noise_std = self.stabilize_grad.noise_std
-                    noise = noise_std * torch.randn_like(root.root)
-                    root.root[:] = root_point + noise
-                grad_root, rel_from, rel_info_from = get_grad_and_rel(root)
-
-                has_nans = not torch.isfinite(grad_root).all()
-                grad_zero = grad_root.abs().sum() < 1e-7
-                if self.stabilize_grad is not None and (has_nans or grad_zero):
-                    if i + 1 <= self.stabilize_grad.max_tries:
-                        continue
-
-                if self.check_nans and not torch.isfinite(grad_root).all():
-                    raise ValueError("Gradient of root is not finite")
-                break
-
-            rel_j = rel_from + grad_root * (input - root.root)
-            roots_relevance.append(rel_j)
-            rel_infos.append(rel_info_from)
-
-        print(f"Finished decomposing: {to_idx} <- {from_idx}")
-        total_rel = torch.stack(roots_relevance, dim=0).sum(0)
-        return DecomposedRel(
-            roots=roots,
-            relevance_of_from_layer=rel_from,
-            relevance=total_rel,
-            roots_relevance=roots_relevance,
-            relevance_info_from=rel_infos,
-            relevance_fn=self,
-        )
-
-
-@dataclasses.dataclass(frozen=True)
-class TrainFreeRel(Relevance):
-    roots: list[RootPoint]
-    grad_roots: list[torch.Tensor]
-    roots_relevance: list[torch.Tensor]
-    relevance_of_upper_layer: Relevance
-    relevance: torch.Tensor
-    relevance_fn: TrainFreeFn
-
-    def __repr__(self) -> str:
-        return (
-            f"TrainFreeRel(#roots={len(self.roots)}, "
-            f"relevance_of_upper_layer={self.relevance_of_upper_layer}, "
-            f"relevance={self.relevance}, ...)"
-        )
-
-    def collect_relevances(self) -> list[Relevance]:
-        self_rel: list[Relevance] = [self]
-        upper_rel: list[
-            Relevance
-        ] = self.relevance_of_upper_layer.collect_relevances()
-
-        return self_rel + upper_rel
-
-
-@dataclasses.dataclass(frozen=True)
-class TrainFreeFn(RelevanceFn[TrainFreeRel]):
-    mlp: MLP
-    to_input_of: LinearReLU
-    from_output_of: LinearReLU
-    relevance_fn: RelevanceFn
-    root_finder: RecursiveRoots
-    check_nans: bool = True
-    stabilize_grad: Optional[StabilizeGradient] = StabilizeGradient()
-
-    def __repr__(self) -> str:
-        to_idx = self.mlp.layers.index(self.to_input_of)
-        from_idx = self.mlp.layers.index(self.from_output_of)
-
-        return (
-            f"TrainFreeFn(to_input_of={to_idx}, "
-            f"from_output_of={from_idx}, "
-            f"rule={self.root_finder.rule.name}, ...)"
-        )
-
-    def __call__(self, input: torch.Tensor) -> TrainFreeRel:
-        to_idx = self.mlp.get_layer_index(self.to_input_of)
-        from_idx = self.mlp.get_layer_index(self.from_output_of)
-
-        # Approximation: use input instead of root
-        rel_info_from = self.relevance_fn(self.to_input_of(input))
-        rel_from = rel_info_from.relevance
-
-        roots = self.root_finder.get_root_points_for_layer(
-            self.to_input_of,
-            input,
-            rel_from,
-        )
-        roots_relevance = []
-        rel_infos = []
-        grad_roots = []
-
-        for root in roots:
-            root.root.requires_grad_(True)
-
-            # To ensure gradient is not zero, only derive linear layer
-            output = self.to_input_of.linear(root.root)
-
-            output_sel = ensure_2d(output[:, root.explained_neuron])
-
-            (grad_root,) = torch.autograd.grad(
-                output_sel,
-                root.root,
-                # grad_outputs=ensure_2d(rel_from[:, root.explained_neuron]),
-                grad_outputs=torch.ones_like(output_sel),
-            )
-
-            rel_j = grad_root * (input - root.root)
-            assert torch.allclose(
-                rel_j.sum(), rel_from[0, root.explained_neuron]
-            )
-            roots_relevance.append(rel_j)
-            rel_infos.append(rel_info_from)
-            grad_roots.append(grad_root)
-
-        print(f"Finished decomposing: {to_idx} <- {from_idx}")
-        total_rel = torch.stack(roots_relevance, dim=0).sum(0)
-        # assert (total_rel >= 0).all()
-        return TrainFreeRel(
-            roots=roots,
-            grad_roots=grad_roots,
-            roots_relevance=roots_relevance,
-            relevance_of_upper_layer=rel_info_from,
-            relevance=total_rel,
-            relevance_fn=self,
-        )
-
-
-def get_decompose_relevance_fns(
-    mlp: MLP,
-    explained_output: int,
-    rule: Rule,
-    root_finder: Optional[RecursiveRoots] = None,
-    decomposition: str = "full",
-) -> list[RelevanceFn]:
-    rel_fns: list[RelevanceFn] = [
-        OutputRelFn(mlp=mlp, explained_output=explained_output)
-    ]
-    if root_finder is None:
-        root_finder = RecursiveRoots(
-            mlp=mlp, explained_output=explained_output, rule=rule
-        )
-
-    for layer in reversed(mlp.layers[:]):
-
-        if decomposition == "full":
-            rel_fns.append(
-                DecomposedRelFn(
-                    mlp=mlp,
-                    to_input_of=layer,
-                    from_output_of=layer,
-                    relevance_fn=rel_fns[-1],
-                    root_finder=root_finder,
-                )
-            )
-        elif decomposition == "train_free":
-            rel_fns.append(
-                TrainFreeFn(
-                    mlp=mlp,
-                    to_input_of=layer,
-                    from_output_of=layer,
-                    relevance_fn=rel_fns[-1],
-                    root_finder=root_finder,
-                )
-            )
-
-    return rel_fns
-
-
-# def compose_relevance_fn(
-#     mlp: MLP,
-#     start_at: LinearReLU,
-#     explained_neuron: int,
-#     explained_output: int,
-#     rule: Rule,
-#     compute_root_fn: Callable[[torch.Tensor], torch.Tensor],
-# ) -> Callable[[torch.Tensor], torch.Tensor]:
-#     def first_relevance_fn(root: torch.Tensor) -> torch.Tensor:
-#         output = mlp(root, first=mlp.last_layer)
-#         rel = output[:, explained_output].unsqueeze(1)
-#         return rel
-#
-#     def compute_relevance_of_output(
-#         input: torch.Tensor,
-#         start_at: LinearReLU,
-#     ) -> torch.Tensor:
-#         """Compute the relevance of the output neuron."""
-#         output = mlp(input, first=start_at)
-#         rel = output[:, explained_output].unsqueeze(1)
-#         return rel
-#
-#     def view_relevance_fn(
-#         start_at: LinearReLU,
-#         end_at: LinearReLU,
-#         relevance_at_end: Callable[[torch.Tensor], torch.Tensor],
-#         explained_neuron: Union[slice, int] = slice(None, None),
-#     ) -> Callable[[torch.Tensor], torch.Tensor]:
-#         """ """
-#
-#         def relevance_fn(input: torch.Tensor) -> torch.Tensor:
-#             input.requires_grad_(True)
-#             output = mlp(input, first=start_at, last=end_at)
-#             rel = relevance_at_end(output)
-#             rel = rel[:, explained_neuron]
-#             if rel.ndim == 1:
-#                 rel = rel.unsqueeze(1)
-#             return rel
-#
-#         return relevance_fn
-#
-#     def stack_relevance_fns(
-#         relevance_fns: list[Callable[[torch.Tensor], torch.Tensor]]
-#     ) -> Callable[[torch.Tensor], torch.Tensor]:
-#         def relevance_fn(input: torch.Tensor) -> torch.Tensor:
-#             rel = relevance_fns[0](input)
-#             for relevance_fn in relevance_fns[1:]:
-#                 rel = relevance_fn(rel)
-#                 rel = rel.sum(dim=1)
-#
-#             return rel
-#
-#         return relevance_fn
-#
-#     def relevance_fn(input: torch.Tensor) -> torch.Tensor:
-#         rr = RecursiveRoots(mlp, explained_output=explained_output, rule=rule)
-#         roots = rr.run(input, start_at=mlp.last_layer)
-#         assert len(roots) == 1
-#         root = roots[0]
-#
-#         # rel_last_output = first_relevance_fn(root)
-#
-#         roots = rr.run(input, start_at=mlp.layers[-2])
-#
-#         rel_fn = view_relevance_fn(
-#             start_at=mlp.layers[-2],
-#             end_at=mlp.layers[-2],
-#             relevance_at_end=first_relevance_fn,
-#         )
-#         rel = rel_fn(roots[0].root)
-#
-#         for layer in reversed(mlp.layers[:-1]):
-#             rel_fn = view_relevance_fn(
-#                 layer,
-#                 layer,
-#                 stack_relevance_fns(rel_fns),
-#                 explained_neuron=explained_neuron,
-#             )
-#             # rel = induction_relevance_fn(root)
-#
-#             (grad_rel,) = torch.autograd.grad(rel.sum(), input)
-#
-#     return relevance_fn
-#
-#
-#
-# def compute_relevance(
-#     input: torch.Tensor,
-#     root: torch.Tensor,
-#     relevance_fn: Callable[[torch.Tensor], torch.Tensor],
-# ) -> torch.Tensor:
-#
-#     relevance = relevance_fn(root)
-#     grad_rel = torch.autograd.backward(relevance, root)
-#     return grad_rel * (input - root)
-
-
-# ------------------------------------------------------------------------------
-
-
-def get_relevance_hidden(
-    net: TwoLayerMLP,
-    x: torch.Tensor,
-    j: int = 0,
-    rule: RULE = "z+",
-) -> torch.Tensor:
-    return get_relevance_hidden_and_root(net, x, j, rule)[0]
-
-
-def get_relevance_hidden_and_root(
-    net: TwoLayerMLP,
-    x: torch.Tensor,
-    j: int = 0,
-    rule: RULE = "z+",
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return the relevance of each neuron in the hidden layer and the
-    corresponding root point.
-
-    This applies the given DTD rule to the final layer.
-
-    Args:
-        net: TwoLayerMLP network.
-        x: Input tensor.
-        j: Index of which neuron in the final layer to compute the relevance.
-        rule: Rule to compute the root point
-
-    Returns:
-        A tuple of two tensors: (the relevance of each neuron in the hidden
-            layer, the corresponding root point).
-    """
-    with record_all_outputs(net) as outputs:
-        net(x)
-
-    # outputs
-    hidden = outputs[net.layer1][0]
-    hidden_root = compute_root_for_single_neuron(
-        hidden, net.layer2, j, rule=rule
-    )
-    assert hidden_root is not None
-    assert torch.isnan(hidden_root).sum() == 0
-
-    output_root = net.layer2.linear(hidden_root)
-
-    assert output_root.isnan().sum() == 0
-    (rel_grad,) = torch.autograd.grad(
-        output_root,
-        hidden_root,
-        grad_outputs=torch.ones_like(output_root),
-        retain_graph=True,
-    )
-    assert rel_grad.isnan().sum() == 0
-    rel_hidden = rel_grad * (hidden - hidden_root)
-    return rel_hidden, hidden_root
-
-
-def find_input_root_point(
-    net: TwoLayerMLP,
-    x: torch.Tensor,
-    j: int,
-    relevance_fn: Callable[[TwoLayerMLP, torch.Tensor], torch.Tensor],
-    n_samples: int = 1_000,
-    plot: bool = False,
-) -> torch.Tensor:
-    """Return the root point of the input layer.
-
-    Args:
-        net: TwoLayerMLP network.
-        x: Input tensor.
-        j: Index of which neuron in the hidden layer to compute the relevance.
-        relevance_fn: Function to compute the relevance of each neuron in the
-            hidden layer.
-        n_samples: Number of samples to find the root point.
-
-    Returns:
-        The root point of the input layer.
-    """
-
-    assert x.size(0) == 1
-    length = 3 * torch.randn(n_samples, 1) + 5
-    x_search = x + torch.randn(n_samples, x.size(1)) * length
-
-    rel_hidden_search = relevance_fn(net, x_search)
-
-    idx = rel_hidden_search[:, j].abs().argmin()
-
-    steps = torch.linspace(-0.3, 1.05, 100).view(-1, 1)
-
-    smallest_x = x_search[idx].unsqueeze(0)
-    x_line_search = smallest_x + steps * (x - smallest_x)
-
-    rel_hidden_line_search = relevance_fn(net, x_line_search)
-
-    if plot:
-        import matplotlib.pyplot as plt
-
-        plt.plot(rel_hidden_line_search.detach().cpu().numpy()[:, j])
-        plt.show()
-    root_idx = (rel_hidden_line_search[:, j] <= 1e-2).nonzero().max()
-    return x_line_search[root_idx]
-
-
-# -----------------------------------------------------------------------------
-# Utils
-
-
-def almost_unique(x: torch.Tensor, atol: float = 1e-5) -> torch.Tensor:
-    """Returns indices of unique elements in x, with tolerance atol."""
-    sort_idx = torch.argsort(torch.norm(x, dim=1))
-    x_sorted = x[sort_idx]
-
-    dist = torch.pairwise_distance(x_sorted[:-1], x_sorted[1:])
-
-    below_atol = (dist > atol).long()
-
-    unique = dist.new_zeros(dist.shape[0] + 1, dtype=torch.long)
-    unique[1:] = below_atol.cumsum(dim=0)
-
-    unique_mask = x.new_zeros(size=(len(x),), dtype=torch.long)
-    unique_mask[sort_idx] = unique
-    return unique_mask
-
-
-class record_all_outputs:
-    """A context manager that stores all outputs of all layers."""
-
-    def __init__(self, module: nn.Module):
-        self.module = module
-        self.outputs: dict[nn.Module, list[torch.Tensor]] = {}
-        self.handles: list[hooks.RemovableHandle] = []
-
-    def __enter__(
-        self,
-    ) -> dict[nn.Module, list[torch.Tensor]]:
-        def hook(
-            module: nn.Module, inputs: tuple[torch.Tensor], output: torch.Tensor
-        ) -> None:
-            if module not in self.outputs:
-                self.outputs[module] = []
-
-            self.outputs[module].append(output)
-
-        self.module.apply(
-            lambda module: self.handles.append(
-                module.register_forward_hook(hook)
-            )
-        )
-        return self.outputs
-
-    def __exit__(self, *args):
-        for handle in self.handles:
-            handle.remove()

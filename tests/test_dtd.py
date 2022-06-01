@@ -203,7 +203,7 @@ def test_decompose_relevance_fns_train_free():
 
     for rel in decomposition.collect_relevances():
         if isinstance(rel, dtd.TrainFreeRel):
-            layer_idx = mlp.get_layer_index(rel.relevance_fn.to_input_of)
+            layer_idx = mlp.get_layer_index(rel.computed_with_fn.to_input_of)
             print(
                 layer_idx,
                 rel.relevance.sum().item(),
