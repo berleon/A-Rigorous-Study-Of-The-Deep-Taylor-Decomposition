@@ -3,6 +3,7 @@ import dataclasses
 import savethat
 import torch
 from torch import nn
+from tqdm import auto as tqdm
 
 from lrp_relations import dtd
 
@@ -21,6 +22,10 @@ class SamplingResult:
     grad_atol: float
     n_warmup: int
 
+    def all_samples(self):
+        steps, b, d = self.chain.shape
+        return self.chain.view(steps * b, d)
+
 
 def sample(
     model: nn.Module,
@@ -30,6 +35,7 @@ def sample(
     grad_rtol: float = 1e-3,
     grad_atol: float = 1e-5,
     n_warmup: int = 100,
+    show_progress: bool = False,
 ) -> SamplingResult:
     current = start
     start.requires_grad_(True)
@@ -47,7 +53,7 @@ def sample(
     chain = []
     accept_ratio = []
     scale_history = []
-    for i in range(n_warmup + n_steps):
+    for i in tqdm.trange(n_warmup + n_steps, disable=not show_progress):
         offset = scale * torch.randn_like(current)
         proposals = current + offset
         out = model(proposals)

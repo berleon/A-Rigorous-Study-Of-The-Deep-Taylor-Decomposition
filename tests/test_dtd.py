@@ -154,7 +154,7 @@ def test_decompose_relevance_fns_full():
     explained_output = 0
 
     torch.manual_seed(0)
-    mlp = dtd.MLP(5, 10, 10, 2)
+    mlp = dtd.MLP(3, 10, 10, 2)
     mlp.init_weights()
 
     torch.manual_seed(0)
@@ -164,12 +164,63 @@ def test_decompose_relevance_fns_full():
             continue
         break
 
+    root_finder = dtd.RecursiveRoots(mlp, explained_output, rule)
+
+    rel_fn_builder = dtd.DecomposedRelFn.get_fn_builder(
+        mlp,
+        root_finder=root_finder,
+        check_nans=True,
+        stabilize_grad=None,
+    )
     decomposed_fns = dtd.get_decompose_relevance_fns(
-        mlp, explained_output=explained_output, rule=rule, decomposition="full"
+        mlp, explained_output, rel_fn_builder
     )
 
-    with pytest.raises(ValueError):
-        decomposed_fns[-1](x)
+    # with pytest.raises(RuntimeError):
+    out = decomposed_fns[-1](x)
+
+    assert torch.isfinite(out.relevance).all()
+
+
+def test_local_segment_roots():
+    torch.manual_seed(2)
+    mlp = dtd.MLP(3, 10, 10, 2)
+    mlp.init_weights()
+    explained_output = 0
+
+    torch.manual_seed(4)
+    for _ in range(100):
+        x = torch.randn(1, mlp.input_size)
+        if mlp(x)[:, explained_output] <= 0.25:
+            continue
+        break
+
+    root_finder = dtd.LocalSegmentRoots(mlp, n_steps=50, n_warmup=10)
+
+    rel_fn = dtd.NetworkOutputRelevanceFn(
+        mlp, mlp.first_layer, explained_output
+    )
+    roots = root_finder.get_root_points_for_layer(
+        mlp.first_layer, x, relevance_fn=rel_fn
+    )
+    assert len(roots) == 1
+    assert roots[0].root.shape == (1, 10)
+
+    rel_fn_builder = dtd.DecomposedRelFn.get_fn_builder(
+        mlp,
+        root_finder=root_finder,
+        stabilize_grad=None,
+    )
+
+    rel_fns = dtd.get_decompose_relevance_fns(
+        mlp,
+        explained_output,
+        rel_fn_builder,
+    )
+
+    out = rel_fns[-2](x)
+
+    assert torch.isfinite(out.relevance).all()
 
 
 def test_decompose_relevance_fns_train_free():
@@ -192,18 +243,23 @@ def test_decompose_relevance_fns_train_free():
 
     assert mlp(x)[:, explained_output] > 0.25
 
+    rel_fn_builder = dtd.TrainFreeFn.get_fn_builder(
+        mlp,
+        root_finder=dtd.RecursiveRoots(mlp, explained_output, rule),
+    )
     decomposed_fns = dtd.get_decompose_relevance_fns(
         mlp,
-        explained_output=explained_output,
-        rule=rule,
-        decomposition="train_free",
+        explained_output,
+        rel_fn_builder,
     )
 
     decomposition = decomposed_fns[-1](x)
 
     for rel in decomposition.collect_relevances():
         if isinstance(rel, dtd.TrainFreeRel):
-            layer_idx = mlp.get_layer_index(rel.computed_with_fn.to_input_of)
+            layer_idx = mlp.get_layer_index(
+                rel.computed_with_fn.get_lower_rel_layer()
+            )
             print(
                 layer_idx,
                 rel.relevance.sum().item(),
