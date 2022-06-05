@@ -50,6 +50,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo apt install graphviz libgraphviz-dev
           python -m pip install --upgrade pip
           pip install poetry
 
