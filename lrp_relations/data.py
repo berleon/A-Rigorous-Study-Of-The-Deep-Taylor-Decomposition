@@ -1,7 +1,7 @@
 import json
 import pickle
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, cast
 
 import numpy as np
 import torch
@@ -127,12 +127,12 @@ class CLEVR_XAI(torch_data.Dataset):
             img = rel_data.resize(img)
 
         # always use eval transform
-        img = rel_data.eval_transform(img)
+        img_tensor = cast(torch.Tensor, rel_data.eval_transform(img))
 
         if self.reverse_question:
             question = question[::-1]
 
-        return img, question, len(question), answer, index
+        return img_tensor, question, len(question), answer, index
 
     def get_ground_truth(self, index: int) -> torch.Tensor:
         _, gt_path = self.gt_filenames[index]

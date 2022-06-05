@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lrp_relations import dtd
+from lrp_relations import dtd, local_linear
 
 
 def test_dtd_root():
@@ -87,66 +87,6 @@ def test_almost_unique():
     assert unique_idx == [0, 1, 1, 0, 2]
 
 
-@pytest.mark.skip(reason="TODO")
-def test_dtd_precise():
-
-    torch.manual_seed(0)
-
-    x = torch.rand(1, 5)
-    net = dtd.MLP(
-        n_layers=3,
-        input_size=5,
-        hidden_size=10,
-        output_size=2,
-    )
-    precise_dtd = dtd.PreciseDTD(
-        net,
-        explained_class=0,
-        rule="z+",
-        root_max_relevance=1e-3,
-        n_random_samples=10,
-    )
-    with dtd.record_all_outputs(net) as outs:
-        net(x)
-    last_layer = net.layers[-1]
-    input_last_layer = outs[net.layers[-2]][0]
-    root_last_layer = precise_dtd.find_root_point(
-        last_layer, input_last_layer, must_be_positive=True
-    )
-    assert (root_last_layer >= 0).all()
-    assert root_last_layer.shape == (1, 10)
-
-    random_root = torch.rand(50, 10)
-    rel_random_root = precise_dtd.compute_relevance_of_input(
-        last_layer, random_root
-    )
-    assert rel_random_root.shape == (50, 10)
-
-
-@pytest.mark.skip(reason="TODO")
-def test_dtd_precise_explain():
-
-    torch.manual_seed(0)
-
-    x = torch.rand(1, 5)
-    net = dtd.MLP(
-        n_layers=3,
-        input_size=5,
-        hidden_size=10,
-        output_size=2,
-    )
-    precise_dtd = dtd.PreciseDTD(
-        net,
-        explained_class=0,
-        rule="z+",
-        root_max_relevance=1e-3,
-        n_random_samples=10,
-    )
-    x = torch.rand(1, 5)
-    ctx = precise_dtd.explain(x)
-    assert ctx[net.layers[0]].relevance.shape == (1, 5)
-
-
 def test_decompose_relevance_fns_full():
     torch.autograd.set_detect_anomaly(True)
 
@@ -158,31 +98,32 @@ def test_decompose_relevance_fns_full():
     mlp.init_weights()
 
     torch.manual_seed(0)
-    for _ in range(100):
+    for _ in range(1000):
         x = torch.randn(1, mlp.input_size)
         if mlp(x)[:, explained_output] <= 0:
             continue
         break
 
+    assert mlp(x)[:, explained_output] > 0
+
     root_finder = dtd.RecursiveRoots(mlp, explained_output, rule)
 
-    rel_fn_builder = dtd.DecomposedRelFn.get_fn_builder(
+    rel_fn_builder = dtd.FullBackwardFn.get_fn_builder(
         mlp,
         root_finder=root_finder,
         check_nans=True,
-        stabilize_grad=None,
+        stabilize_grad=dtd.StabilizeGradient(noise_std=1.0, max_tries=100),
     )
     decomposed_fns = dtd.get_decompose_relevance_fns(
         mlp, explained_output, rel_fn_builder
     )
 
-    # with pytest.raises(RuntimeError):
-    out = decomposed_fns[-1](x)
+    with pytest.raises(RuntimeError):
+        out = decomposed_fns[-1](x)
+        assert torch.isfinite(out.relevance).all()
 
-    assert torch.isfinite(out.relevance).all()
 
-
-def test_local_segment_roots():
+def test_metropolis_hasting_root_finder():
     torch.manual_seed(2)
     mlp = dtd.MLP(3, 10, 10, 2)
     mlp.init_weights()
@@ -195,7 +136,15 @@ def test_local_segment_roots():
             continue
         break
 
-    root_finder = dtd.LocalSegmentRoots(mlp, n_steps=50, n_warmup=10)
+    assert mlp(x)[:, explained_output] > 0.25
+
+    root_finder = dtd.MetropolisHastingRootFinder(
+        mlp,
+        args=local_linear.MetropolisHastingArgs(
+            n_steps=50,
+            n_warmup=10,
+        ),
+    )
 
     rel_fn = dtd.NetworkOutputRelevanceFn(
         mlp, mlp.first_layer, explained_output
@@ -206,7 +155,7 @@ def test_local_segment_roots():
     assert len(roots) == 1
     assert roots[0].root.shape == (1, 10)
 
-    rel_fn_builder = dtd.DecomposedRelFn.get_fn_builder(
+    rel_fn_builder = dtd.FullBackwardFn.get_fn_builder(
         mlp,
         root_finder=root_finder,
         stabilize_grad=None,
@@ -220,7 +169,39 @@ def test_local_segment_roots():
 
     out = rel_fns[-2](x)
 
+    assert root_finder.cache_hits > 0
+    assert root_finder.cache_misses > 0
+
     assert torch.isfinite(out.relevance).all()
+
+
+def test_sample_roots_interpolate():
+    torch.manual_seed(0)
+    mlp = dtd.MLP(3, 10, 10, 2)
+    mlp.init_weights()
+    explained_output = slice(0, 1)
+    x = mlp.get_input_with_output_greater(0.5, explained_output)
+
+    mlp_output = mlp.slice(output=explained_output)
+
+    root_finder = dtd.InterpolationRootFinder(
+        mlp_output,
+        args=local_linear.InterpolationArgs(
+            batch_size=50,
+            show_progress=True,
+            enforce_non_negative=False,
+        ),
+    )
+
+    network_output_fn = dtd.NetworkOutputRelevanceFn(
+        mlp_output, mlp.first_layer, explained_output
+    )
+
+    roots = root_finder.get_root_points_for_layer(
+        mlp.first_layer, x, relevance_fn=network_output_fn
+    )
+
+    assert len(roots) > 0
 
 
 def test_decompose_relevance_fns_train_free():
@@ -280,3 +261,63 @@ def test_decompose_relevance_fns_train_free():
         assert torch.allclose(
             rel.relevance.sum(), decomposition.relevance.sum(), atol=1e-2
         )
+
+
+# @pytest.mark.skip(reason="TODO")
+# def test_dtd_precise():
+#
+#     torch.manual_seed(0)
+#
+#     x = torch.rand(1, 5)
+#     net = dtd.MLP(
+#         n_layers=3,
+#         input_size=5,
+#         hidden_size=10,
+#         output_size=2,
+#     )
+#     precise_dtd = dtd.PreciseDTD(
+#         net,
+#         explained_class=0,
+#         rule="z+",
+#         root_max_relevance=1e-3,
+#         n_random_samples=10,
+#     )
+#     with dtd.record_all_outputs(net) as outs:
+#         net(x)
+#     last_layer = net.layers[-1]
+#     input_last_layer = outs[net.layers[-2]][0]
+#     root_last_layer = precise_dtd.find_root_point(
+#         last_layer, input_last_layer, must_be_positive=True
+#     )
+#     assert (root_last_layer >= 0).all()
+#     assert root_last_layer.shape == (1, 10)
+#
+#     random_root = torch.rand(50, 10)
+#     rel_random_root = precise_dtd.compute_relevance_of_input(
+#         last_layer, random_root
+#     )
+#     assert rel_random_root.shape == (50, 10)
+#
+#
+# @pytest.mark.skip(reason="TODO")
+# def test_dtd_precise_explain():
+#
+#     torch.manual_seed(0)
+#
+#     x = torch.rand(1, 5)
+#     net = dtd.MLP(
+#         n_layers=3,
+#         input_size=5,
+#         hidden_size=10,
+#         output_size=2,
+#     )
+#     precise_dtd = dtd.PreciseDTD(
+#         net,
+#         explained_class=0,
+#         rule="z+",
+#         root_max_relevance=1e-3,
+#         n_random_samples=10,
+#     )
+#     x = torch.rand(1, 5)
+#     ctx = precise_dtd.explain(x)
+#     assert ctx[net.layers[0]].relevance.shape == (1, 5)

@@ -32,8 +32,10 @@ class PreprocessCLEVR_XAI(savethat.Node[PreprocessCLEVR_XAIArgs, None]):
                 split=None,
                 word_dic=encoding["word_dic"],
                 answer_dic=encoding["answer_dic"],
-                question_file=clevr_xai / question_file,
-                result_file=(clevr_xai / question_file).with_suffix(".pkl"),
+                question_file=str(clevr_xai / question_file),
+                result_file=str(
+                    (clevr_xai / question_file).with_suffix(".pkl")
+                ),
             )
 
         print("Processing images")

@@ -117,10 +117,9 @@ class SanityChecksForRelationNetworks(
         lrp_relnet.to(device)
 
         for i, (image, question, q_len, answer, _) in enumerate(pbar):
-            image, question, q_len, answer = (
+            image, question, answer = (
                 image.to(device),
                 question.to(device),
-                torch.tensor(q_len),
                 answer.to(device),
             )
 

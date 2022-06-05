@@ -1,6 +1,7 @@
 # from relation_network import dataset as rel_dataset
 import pytest
 import torch
+import torch.utils.data
 
 from lrp_relations import data, gt_eval, utils
 

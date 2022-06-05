@@ -230,10 +230,9 @@ class GroundTruthEval(
             if i > n_samples // self.args.batch_size:
                 break
 
-            image, question, q_len, answer, gt = (
+            image, question, answer, gt = (
                 image.to(device),
                 question.to(device),
-                torch.tensor(q_len),
                 answer.to(device),
                 gt.to(device),
             )

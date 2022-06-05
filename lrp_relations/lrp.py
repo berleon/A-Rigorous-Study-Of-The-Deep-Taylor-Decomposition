@@ -1,7 +1,7 @@
 """Implementation of the LRP_a1_b0 rules for the Relation Network."""
 
 from copy import deepcopy
-from typing import Callable, Union
+from typing import Callable, Union, cast
 
 import captum.attr
 import torch
@@ -44,7 +44,7 @@ class ConcatRule(lrp_rules.EpsilonRule):
             input: torch.Tensor, start: int, end: int
         ) -> Callable[[torch.Tensor], None]:
             def _backward_hook_input(grad: torch.Tensor) -> None:
-                rel = self.relevance_output[grad.device]
+                rel = self.relevance_output[grad.device]  # type: ignore
                 idx = [slice(None, None, None) for _ in range(grad.dim())]
                 idx[self.dim] = slice(start, end)
                 return rel[idx]
@@ -80,7 +80,7 @@ class LRPViewOfRelationNetwork(nn.Module):
         self.conv = deepcopy(relnet.conv)
         self.f = deepcopy(relnet.f)
         self.g = deepcopy(relnet.g)
-        self.coords = deepcopy(relnet.coords)
+        self.coords = cast(torch.Tensor, deepcopy(relnet.coords))
 
         self.conv_hidden = relnet.conv_hidden
         self.lstm_hidden = relnet.lstm_hidden
@@ -103,9 +103,8 @@ class LRPViewOfRelationNetwork(nn.Module):
             batch_size, n_pair * n_pair, self.lstm_hidden
         )
 
-        conv = torch.cat(
-            [conv, self.coords.expand(batch_size, 2, conv_h, conv_w)], 1
-        )
+        coords = self.coords.expand(batch_size, 2, conv_h, conv_w)
+        conv = torch.cat([conv, coords], 1)
         n_channel += 2
         conv_tr = conv.view(batch_size, n_channel, -1).permute(0, 2, 1)
         conv1 = conv_tr.unsqueeze(1).expand(

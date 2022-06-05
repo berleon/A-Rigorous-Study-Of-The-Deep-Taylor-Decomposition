@@ -13,19 +13,19 @@ homepage = "https://github.com/berleon/sanity_checks_for_relation_networks"
 license = "MIT"
 name = "lrp_relations"
 packages = [
-  {include = "lrp_relations"},
-  {include = "tests", format = "sdist"},
-  {include = "relation_network"},
+  { include = "lrp_relations" },
+  { include = "tests", format = "sdist" },
+  { include = "relation_network" },
 ]
 readme = "README.md"
 version = "0.1.0"
 
 [tool.poetry.dependencies]
-matplotlib = {version = "^3.2.1", optional = true}
-numpy = {version = "^1.18.1", optional = true}
+matplotlib = { version = "^3.2.1", optional = true }
+numpy = { version = "^1.18.1", optional = true }
 pandas = "^1.4.2"
 python = ">=3.9,<4.0"
-savethat = {git = "https://github.com/berleon/savethat", branch = "main"}
+savethat = { git = "https://github.com/berleon/savethat", branch = "main" }
 # scikit-learn = {version = "^0.22.1", optional = true}
 #
 # TODO: Poetry and torch do not work together.
@@ -39,12 +39,14 @@ savethat = {git = "https://github.com/berleon/savethat", branch = "main"}
 #      { url = "https://download.pytorch.org/whl/cpu/torchvision-0.11.3-cp39-cp39-manylinux2014_aarch64.whl", markers = "platform_machine == 'aarch64' and sys_platform == 'linux'" }
 #    ]
 # captum = "^0.5.0"
-clevr-xai = {git = "https://github.com/berleon/clevr-xai.git", rev = "poetry"}
+clevr-xai = { git = "https://github.com/berleon/clevr-xai.git", rev = "poetry" }
 nltk = "^3.7"
 types-toml = "^0.10.7"
 ipython = "^8.4.0"
 ipywidgets = "^7.7.0"
 traitlets = "5.1.0"
+networkx = "^2.8.2"
+einops = "^0.4.1"
 
 [tool.poetry.dev-dependencies]
 
@@ -56,15 +58,15 @@ mkdocs-autorefs = "^0.4.1"
 mkdocs-include-markdown-plugin = "^3.4.0"
 mkdocs-material = "^8.2.14"
 mkdocstrings = "^0.18.1"
-mypy = "^0.960"
 pip = "^22.1"
 pre-commit = "^2.19.0"
 pytest = "^7.1.2"
 pytest-cov = "^3.0.0"
-python-lsp-server = {extras = ["all"], version = "^1.4.1"}
+python-lsp-server = { extras = ["all"], version = "^1.4.1" }
 tox = "^3.20.1"
 twine = "^4.0.0"
 virtualenv = "^20.2.2"
+pyright = "^1.1.252"
 
 [tool.black]
 exclude = '''
@@ -102,43 +104,15 @@ use_parentheses = true
 build-backend = "poetry.core.masonry.api"
 requires = ["poetry-core>=1.0.0"]
 
-[tool.mypy]
-check_untyped_defs = true
-disallow_incomplete_defs = true
-disallow_untyped_calls = false
-disallow_untyped_decorators = true
-no_implicit_optional = true
-python_version = 3.9
-show_error_codes = true
-strict_optional = true
-warn_redundant_casts = true
-warn_return_any = false
-warn_unused_configs = true
-warn_unused_ignores = true
 
-exclude = [
-  'relation_network/',
-  'lrp_relations/sequential_lr_fix.py',
-]
+[tool.pyright]
+include = ["lrp_relations", "tests"]
+exclude = ['relation_network/', "**/node_modules", "**/__pycache__"]
+# venv = "env367"
 
-[[tool.mypy.overrides]]
-ignore_missing_imports = true
-module = [
-  "captum",
-  "captum.*",
-  "coverage",
-  "matplotlib",
-  "matplotlib.*",
-  "nltk",
-  "pandas",
-  "PIL",
-  "relation_network",
-  "relation_network.*",
-  "scipy.*",
-  "setuptools",
-  "sklearn",
-  "sklearn.*",
-  "torchvision",
-  "tqdm.*",
-  "typing_inspect",
-]
+reportPrivateImportUsage = false
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportUnboundVariable = false
+pythonVersion = "3.9"
+# pythonPlatform = "Linux"
