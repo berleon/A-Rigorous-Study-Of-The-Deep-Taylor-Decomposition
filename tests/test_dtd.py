@@ -1,4 +1,3 @@
-import pytest
 import torch
 
 from lrp_relations import dtd, local_linear
@@ -91,36 +90,28 @@ def test_decompose_relevance_fns_full():
     torch.autograd.set_detect_anomaly(True)
 
     rule = dtd.rules.z_plus
-    explained_output = 0
+    explained_output = slice(0, 1)
 
     torch.manual_seed(0)
     mlp = dtd.MLP(3, 10, 10, 2)
     mlp.init_weights()
 
-    torch.manual_seed(0)
-    for _ in range(1000):
-        x = torch.randn(1, mlp.input_size)
-        if mlp(x)[:, explained_output] <= 0:
-            continue
-        break
+    x = mlp.get_input_with_output_greater(0.10, explained_output)
 
-    assert mlp(x)[:, explained_output] > 0
-
-    root_finder = dtd.RecursiveRoots(mlp, explained_output, rule)
+    root_finder = dtd.RecursiveRoots(mlp, 0, rule)
 
     rel_fn_builder = dtd.FullBackwardFn.get_fn_builder(
         mlp,
         root_finder=root_finder,
         check_nans=True,
-        stabilize_grad=dtd.StabilizeGradient(noise_std=1.0, max_tries=100),
+        stabilize_grad=dtd.StabilizeGradient(noise_std=1e-7, max_tries=10),
     )
     decomposed_fns = dtd.get_decompose_relevance_fns(
         mlp, explained_output, rel_fn_builder
     )
 
-    with pytest.raises(RuntimeError):
-        out = decomposed_fns[-1](x)
-        assert torch.isfinite(out.relevance).all()
+    out = decomposed_fns[-1](x)
+    assert torch.isfinite(out.relevance).all()
 
 
 def test_metropolis_hasting_root_finder():
@@ -176,11 +167,13 @@ def test_metropolis_hasting_root_finder():
 
 
 def test_sample_roots_interpolate():
-    torch.manual_seed(0)
+    torch.manual_seed(1)
     mlp = dtd.MLP(3, 10, 10, 2)
     mlp.init_weights()
     explained_output = slice(0, 1)
-    x = mlp.get_input_with_output_greater(0.5, explained_output)
+    x = mlp.get_input_with_output_greater(
+        0.5, explained_output, non_negative=True
+    )
 
     mlp_output = mlp.slice(output=explained_output)
 
@@ -188,8 +181,10 @@ def test_sample_roots_interpolate():
         mlp_output,
         args=local_linear.InterpolationArgs(
             batch_size=50,
+            n_refinement_steps=10,
+            n_batches=1,
             show_progress=True,
-            enforce_non_negative=False,
+            enforce_non_negative=True,
         ),
     )
 
@@ -203,6 +198,18 @@ def test_sample_roots_interpolate():
 
     assert len(roots) > 0
 
+    rel_fn_builder = dtd.FullBackwardFn.get_fn_builder(
+        mlp,
+        root_finder=root_finder,
+        stabilize_grad=None,
+    )
+
+    rel_fns = dtd.get_decompose_relevance_fns(
+        mlp, explained_output, rel_fn_builder
+    )
+    rel_result = rel_fns[-1](x)
+    assert torch.isfinite(rel_result.relevance).all()
+
 
 def test_decompose_relevance_fns_train_free():
     # torch.autograd.set_detect_anomaly(True)
@@ -210,19 +217,13 @@ def test_decompose_relevance_fns_train_free():
 
     rule = dtd.rules.z_plus
     explained_output = 0
+    output_slice = slice(0, 1)
 
     torch.manual_seed(2)
     mlp = dtd.MLP(5, 10, 10, 2)
     mlp.init_weights()
 
-    torch.manual_seed(4)
-    for _ in range(1_000):
-        x = torch.randn(1, mlp.input_size)
-        if mlp(x)[:, explained_output] <= 0.25:
-            continue
-        break
-
-    assert mlp(x)[:, explained_output] > 0.25
+    x = mlp.get_input_with_output_greater(0.25, output_slice, non_negative=True)
 
     rel_fn_builder = dtd.TrainFreeFn.get_fn_builder(
         mlp,

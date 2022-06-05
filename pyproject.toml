@@ -47,6 +47,7 @@ ipywidgets = "^7.7.0"
 traitlets = "5.1.0"
 networkx = "^2.8.2"
 einops = "^0.4.1"
+pip = "^22.1.2"
 
 [tool.poetry.dev-dependencies]
 
@@ -67,6 +68,7 @@ tox = "^3.20.1"
 twine = "^4.0.0"
 virtualenv = "^20.2.2"
 pyright = "^1.1.252"
+pygraphviz= "^1.9"
 
 [tool.black]
 exclude = '''

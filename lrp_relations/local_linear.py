@@ -124,9 +124,10 @@ def sample_metropolis_hasting(
 @dataclasses.dataclass
 class InterpolationArgs:
     batch_size: int = 50
+    n_batches: int = 1
     init_scale: float = 1
     n_interpolation_points: int = 10
-    n_steps: int = 10
+    n_refinement_steps: int = 10
     grad_rtol: float = 1e-3
     grad_atol: float = 1e-5
     show_progress: bool = False
@@ -149,7 +150,6 @@ def sample_interpolation(
     all_valid_points = []
     proposals = input.clone().detach()
 
-    assert len(input) == 1
     input_grad = _get_start_grad(model, input, args.grad_rtol, args.grad_atol)
 
     if input.shape[0] == 1:
@@ -167,11 +167,9 @@ def sample_interpolation(
         0, 1, steps=args.n_interpolation_points
     ).view(1, -1, 1).repeat(n, 1, d)
 
-    edge_points = []
-    edge_tolerance = []
-    for i in tqdm.trange(
-        args.n_interpolation_points, disable=not args.show_progress
-    ):
+    edge_points: torch.Tensor
+    edge_tolerance: torch.Tensor
+    for i in tqdm.trange(args.n_batches, disable=not args.show_progress):
 
         directions = torch.randn_like(input_batch)
         directions /= directions.norm(dim=1, keepdim=True)
@@ -179,11 +177,10 @@ def sample_interpolation(
 
         low = torch.zeros_like(directions)
         high = args.init_scale * torch.ones_like(directions)
-        tolerance = high - low
 
-        for step in range(args.n_steps):
+        for step in range(args.n_refinement_steps):
             scale = linspace_10 * (high - low) + low
-            scale = torch.zeros_like(scale)
+
             proposals = input_batch.unsqueeze(1) + scale * directions
 
             if step == 0:
@@ -224,17 +221,15 @@ def sample_interpolation(
             # get the first valid point
             idx = accept.float().argmax(dim=1)
 
-            tolerance = high - low
+            edge_points = proposals[torch.arange(len(idx)), idx]
+            edge_tolerance = high - low
             low = scale[idx]
             high = scale[idx + 1]
 
-        edge_points.append(all_valid_points[-1])
-        edge_tolerance.append(tolerance)
-
     result = InterpolationResults(
         torch.cat(all_valid_points),
-        torch.cat(edge_points),
-        torch.cat(edge_tolerance),
+        edge_points,
+        edge_tolerance,
         args,
     )
     assert result.all_valid_points.shape[0] >= 1

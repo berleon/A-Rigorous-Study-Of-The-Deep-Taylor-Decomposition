@@ -36,3 +36,8 @@ download_clevr:
 nltk:
 	# which python /srv/data/leonsixt/lrp_fails_the_sanity_check/venv/nltk_data
 	python -m nltk.downloader all -d "`dirname \`which python\``/../nltk_data"
+
+
+install_mac:
+	brew install graphviz
+	pip install --global-option=build_ext --global-option="-I$(brew --prefix graphviz)/include" --global-option="-L$(brew --prefix graphviz)/lib" pygraphviz

@@ -500,6 +500,12 @@ class SampleRoots(RootFinder):
     cache_hits: int = dataclasses.field(default=0, init=False, hash=False)
     cache_misses: int = dataclasses.field(default=0, init=False, hash=False)
 
+    use_candidates_cache: bool = False
+    candidates_cache: dict[
+        LOCAL_SEGMENTS_CACHE_KEY,
+        torch.Tensor,
+    ] = dataclasses.field(default_factory=dict, init=False, hash=False)
+
     def __post_init__(self):
         pass
 
@@ -557,10 +563,19 @@ class SampleRoots(RootFinder):
             self.cache_misses += 1
 
         root_candidates = self.sample_candidates(model, input, relevance_fn)
-        rel = relevance_fn(root_candidates)
+        if cache_key is not None:
+            self.candidates_cache[cache_key] = root_candidates
 
-        print(rel.relevance.shape, root_candidates.shape)
-        lowest_rel = rel.relevance.argmin(dim=0)
+        candidates_rel = torch.cat(
+            [
+                relevance_fn(root_candidate.unsqueeze(0)).relevance
+                for root_candidate in root_candidates
+            ]
+        )
+
+        # rel.relevacne   [n_candidates, n_neurons]
+        idx = min
+        lowest_rel = candidates_rel.argmin(dim=0)
         roots = []
         for j, idx in enumerate(lowest_rel):
             roots.append(
@@ -570,7 +585,7 @@ class SampleRoots(RootFinder):
                     layer=for_input_to_layer,
                     root_finder=self,
                     explained_neuron=j,
-                    relevance=rel.relevance[idx],
+                    relevance=candidates_rel[idx],
                 )
             )
         if cache_key is not None:
@@ -591,7 +606,7 @@ class InterpolationRootFinder(SampleRoots):
         self, model: MLP, input: torch.Tensor, relevance_fn: RelevanceFn
     ) -> torch.Tensor:
         result = local_linear.sample_interpolation(model, input, args=self.args)
-        return result.all_valid_points
+        return result.edge_points
 
 
 @dataclasses.dataclass
@@ -934,13 +949,15 @@ class FullBackwardRel(Relevance):
     relevance: torch.Tensor
     roots_relevance: list[torch.Tensor]
     unresolved_relevance: list[torch.Tensor]
+    root_grads: list[torch.Tensor]
     relevance_upper_layers: list[Relevance]
 
     def __repr__(self) -> str:
         return (
-            f"DecomposedRel(#roots={len(self.roots)}, "
+            f"FullBackwardRel(#roots={len(self.roots)}, "
             f"relevance_upper_layers={self.relevance_upper_layers}, "
-            f"relevance={self.relevance}, ...)"
+            f"relevance={self.relevance}, "
+            f"unresolved_relevance={self.unresolved_relevance})"
         )
 
     def collect_relevances(self) -> Sequence[Relevance]:
@@ -1028,7 +1045,7 @@ class FullBackwardFn(RelevanceFixedLayersFn[FullBackwardRel]):
         from_idx = self.mlp.get_layer_name(self.upper_rel_layer)
 
         return (
-            f"DecomposedRelFn(to_input_of={to_idx}, "
+            f"FullBackwardFn(to_input_of={to_idx}, "
             f"from_output_of={from_idx}, "
             f"rule={self.root_finder}, ...)"
         )
@@ -1048,19 +1065,22 @@ class FullBackwardFn(RelevanceFixedLayersFn[FullBackwardRel]):
             )
             return grad_root, rel_from, rel_info_from
 
+        assert input.shape[0] == 1
         input.requires_grad_(True)
 
         forward_rel_fn = ForwardInputRelFn[Relevance, RelevanceFn](
             self.mlp, self.input_layer, self.relevance_fn
         )
+        input_rel = forward_rel_fn(input)
+
         roots = self.root_finder.get_root_points_for_layer(
             self.input_layer, input, relevance_fn=forward_rel_fn
         )
-        input_rel = forward_rel_fn(input)
 
         roots_relevance = []
         rel_infos = []
         unresolved_rel = []
+        root_grads = []
         for root in roots:
             root_point = root.root.clone()
             root.root.requires_grad_(True)
@@ -1099,22 +1119,21 @@ class FullBackwardFn(RelevanceFixedLayersFn[FullBackwardRel]):
 
             rel_j = grad_root * (input - root.root)
 
-            print("diff", root_point - root.root)
-            print("unresolved_rel_j", unresolved_rel_j)
-
             # assert grad_root.abs().sum() > 1e-7
             # assert root.relevance is not None
             unresolved_rel.append(unresolved_rel_j)
             if root.relevance is not None and False:
                 # f(x)  = f(x̃) + ∇f(x̃) (x - x̃)
-                # input_rel == rel_from + rel_j.sum()
+                # input_rel == unresolved_rel_j + rel_j.sum()
                 assert torch.allclose(
                     input_rel_j,
                     unresolved_rel_j + rel_j.sum(1),
-                    atol=1e-4,
+                    atol=1e-3,
+                    rtol=0.10,
                 )
             roots_relevance.append(rel_j)
             rel_infos.append(rel_info_from)
+            root_grads.append(grad_root)
 
         # to_idx = self.mlp.get_layer_name(self.input_layer)
         # from_idx = self.mlp.get_layer_name(self.upper_rel_layer)
@@ -1127,6 +1146,7 @@ class FullBackwardFn(RelevanceFixedLayersFn[FullBackwardRel]):
             roots_relevance=roots_relevance,
             relevance_upper_layers=rel_infos,
             unresolved_relevance=unresolved_rel,
+            root_grads=root_grads,
             computed_with_fn=self,
         )
 
