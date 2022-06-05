@@ -98,7 +98,7 @@ def test_decompose_relevance_fns_full():
 
     x = mlp.get_input_with_output_greater(0.10, explained_output)
 
-    root_finder = dtd.RecursiveRoots(mlp, 0, rule)
+    root_finder = dtd.LinearDTDRootFinder(mlp, 0, rule)
 
     rel_fn_builder = dtd.FullBackwardFn.get_fn_builder(
         mlp,
@@ -227,7 +227,7 @@ def test_decompose_relevance_fns_train_free():
 
     rel_fn_builder = dtd.TrainFreeFn.get_fn_builder(
         mlp,
-        root_finder=dtd.RecursiveRoots(mlp, explained_output, rule),
+        root_finder=dtd.LinearDTDRootFinder(mlp, explained_output, rule),
     )
     decomposed_fns = dtd.get_decompose_relevance_fns(
         mlp,

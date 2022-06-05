@@ -108,7 +108,11 @@ class MLP(nn.Module):
         assert isinstance(start, LinearReLU)
         assert isinstance(end, LinearReLU)
 
-        if output is None and self.is_final_layer(end):
+        if output is not None and self.is_final_layer(end):
+            output = output
+        elif output is not None and not self.is_final_layer(end):
+            raise ValueError("Cannot slice output if end is not final layer")
+        elif output is None and self.is_final_layer(end):
             output = self.output_selection
         else:
             output = slice(None, None)
@@ -116,6 +120,7 @@ class MLP(nn.Module):
         start_idx = self.layers.index(start)
         end_idx = self.layers.index(end)
         n_layers = end_idx - start_idx + 1
+        print(output)
         mlp = MLP(
             n_layers,
             start.in_features,
@@ -631,7 +636,7 @@ class MetropolisHastingRootFinder(SampleRoots):
 
 
 @dataclasses.dataclass(frozen=True)
-class RecursiveRoots(RootFinder):
+class LinearDTDRootFinder(RootFinder):
     """Find the roots of a neural network."""
 
     mlp: MLP
@@ -680,6 +685,15 @@ class RecursiveRoots(RootFinder):
             for j, root in enumerate(roots)
             if root is not None
         ]
+
+
+@dataclasses.dataclass(frozen=True)
+class RecursiveRoots(RootFinder):
+    """Find the roots of a neural network."""
+
+    mlp: MLP
+    explained_output: int
+    rule: Rule
 
     def get_root_points(
         self,
@@ -1183,6 +1197,7 @@ class TrainFreeFn(RelevanceFixedLayersFn[TrainFreeRel]):
     relevance_fn: RelevanceFn
     root_finder: RootFinder
     check_nans: bool = True
+    check_consistent: bool = True
     lower_rel_layer: LinearReLU = dataclasses.field(init=False)
 
     @staticmethod
@@ -1190,6 +1205,7 @@ class TrainFreeFn(RelevanceFixedLayersFn[TrainFreeRel]):
         mlp: MLP,
         root_finder: RootFinder,
         check_nans: bool = True,
+        check_consistent: bool = True,
     ) -> REL_FN_FACTORY:
         def factory(
             input_layer: NETWORK_LAYER, upper_rel_fn: RelevanceFn
@@ -1201,6 +1217,7 @@ class TrainFreeFn(RelevanceFixedLayersFn[TrainFreeRel]):
                 relevance_fn=upper_rel_fn,
                 root_finder=root_finder,
                 check_nans=check_nans,
+                check_consistent=check_consistent,
             )
 
         return factory
@@ -1259,9 +1276,11 @@ class TrainFreeFn(RelevanceFixedLayersFn[TrainFreeRel]):
             )
 
             rel_j = grad_root * (input - root.root)
-            assert torch.allclose(
-                rel_j.sum(), rel_from[0, root.explained_neuron]
-            )
+
+            if self.check_consistent:
+                assert torch.allclose(
+                    rel_j.sum(), rel_from[0, root.explained_neuron]
+                )
             # TODO: check nans
 
             roots_relevance.append(rel_j)
