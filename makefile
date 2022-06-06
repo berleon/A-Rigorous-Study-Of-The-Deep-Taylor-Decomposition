@@ -15,7 +15,7 @@ unittest:
 	pytest
 
 coverage:
-	pytest --cov=$(sources) --cov-branch --cov-report=term-missing tests
+	pytest --cov=$(sources) --cov-branch --cov-report=html --cov-report=term-missing tests
 
 pre-commit:
 	pre-commit run --all-files
