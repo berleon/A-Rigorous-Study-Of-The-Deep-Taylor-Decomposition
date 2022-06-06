@@ -1,6 +1,9 @@
+from typing import cast
+
+import captum.attr
 import torch
 
-from lrp_relations import dtd, local_linear
+from lrp_relations import dtd, local_linear, lrp
 
 
 def test_dtd_root():
@@ -262,3 +265,94 @@ def test_decompose_relevance_fns_train_free():
         assert torch.allclose(
             rel.relevance.sum(), decomposition.relevance.sum(), atol=1e-2
         )
+
+
+def test_dtd_relevances_sumup():
+    explained_output: slice = slice(0, 1)
+    rule = dtd.rules.z_plus
+
+    torch.manual_seed(2)
+    mlp = dtd.MLP(1, 10, 10, 2)
+    mlp.init_weights()
+
+    torch.manual_seed(1)
+
+    x = mlp.get_input_with_output_greater(
+        0.25, explained_output, non_negative=True
+    )
+
+    root_finder = dtd.LinearDTDRootFinder(
+        mlp,
+        explained_output.start,
+        rule,
+    )
+
+    input_layer = mlp.first_layer
+
+    output_fn = dtd.OutputRelFn(mlp, explained_output)
+    output_rel = output_fn(input_layer(x))
+
+    const_rel = dtd.ConstantRelFn(
+        mlp,
+        input_layer,
+        input_layer,
+        output_fn.get_upper_rel_layer(),
+        output_rel.relevance,
+    )
+
+    roots = root_finder.get_root_points_for_layer(mlp.first_layer, x, const_rel)
+
+    for root in roots:
+        assert root.root.shape == (1, 10)
+
+    sum_relevance = sum(root.relevance for root in roots)
+    assert sum_relevance == output_rel.relevance.sum()
+
+
+def test_dtd_train_free_matches_captum():
+    explained_output: slice = slice(0, 1)
+    rule = dtd.rules.z_plus
+
+    torch.manual_seed(2)
+    mlp = dtd.MLP(4, 10, 10, 2)
+    mlp.init_weights()
+
+    torch.manual_seed(1)
+
+    x = mlp.get_input_with_output_greater(
+        0.25, explained_output, non_negative=True
+    )
+
+    root_finder = dtd.LinearDTDRootFinder(
+        mlp,
+        explained_output.start,
+        rule,
+    )
+
+    rel_fn_builder = dtd.TrainFreeFn.get_fn_builder(
+        mlp,
+        root_finder=root_finder,
+        check_consistent=True,
+    )
+
+    rel_fns = dtd.get_decompose_relevance_fns(
+        mlp, explained_output, rel_fn_builder
+    )
+
+    mlp_output = mlp.slice(output=explained_output)
+    logit = mlp_output(x)
+
+    rel_result = cast(dtd.TrainFreeRel, rel_fns[-1](x))
+
+    rel_result.relevance
+    lrp.set_lrp_rules(mlp, set_bias_to_zero=True)
+    lrp_attr = captum.attr.LRP(mlp)
+    saliency = lrp_attr.attribute(x, target=explained_output.start)
+
+    assert torch.allclose(saliency.sum(), logit)
+
+    assert torch.allclose(
+        rel_result.relevance,
+        saliency,
+        atol=1e-5,
+    )

@@ -177,10 +177,12 @@ class LRPViewOfRelationNetwork(nn.Module):
         return saliency, logits
 
 
-def set_lrp_rules(lrp_relnet: nn.Module) -> None:
+def set_lrp_rules(lrp_relnet: nn.Module, set_bias_to_zero: bool = True) -> None:
     for module in lrp_relnet.modules():
         if isinstance(module, (nn.Conv2d, nn.ReLU, nn.Linear, Sum)):
-            module.rule = lrp_rules.Alpha1_Beta0_Rule(set_bias_to_zero=False)
+            module.rule = lrp_rules.Alpha1_Beta0_Rule(
+                set_bias_to_zero=set_bias_to_zero
+            )
         elif isinstance(module, Concat):
             module.rule = ConcatRule(module.dim)
         else:

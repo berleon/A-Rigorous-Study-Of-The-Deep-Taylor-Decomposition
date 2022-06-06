@@ -463,7 +463,7 @@ class RootPoint:
     layer: NETWORK_LAYER
     root_finder: RootFinder
     explained_neuron: Union[int, slice]
-    relevance: Optional[torch.Tensor]
+    relevance: torch.Tensor
 
     def __repr__(self) -> str:
         return (
