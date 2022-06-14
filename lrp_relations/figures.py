@@ -102,8 +102,18 @@ def latexify(
     linewidth: float = 0.5,
     n_colors: Optional[int] = None,
 ):
-    style = latex_style()
-    with mpl_style(style), sns.color_palette("colorblind", n_colors=n_colors):
+    style = latex_style(
+        dark_gray=dark_gray,
+        light_gray=light_gray,
+        small_size=small_size,
+        tiny_size=tiny_size,
+        linewidth_thin=linewidth_thin,
+        linewidth=linewidth,
+    )
+
+    with mpl_style(style), sns.color_palette(
+        "colorblind", n_colors=n_colors  # type: ignore
+    ):
         yield
 
 

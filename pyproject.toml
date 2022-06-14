@@ -48,6 +48,8 @@ traitlets = "5.1.0"
 networkx = "^2.8.2"
 einops = "^0.4.1"
 pip = "^22.1.2"
+pyright = "^1.1.254"
+seaborn = {git = "https://github.com/mwaskom/seaborn.git"}
 
 [tool.poetry.dev-dependencies]
 
