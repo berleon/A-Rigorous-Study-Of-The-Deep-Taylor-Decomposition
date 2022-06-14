@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-from typing import Callable, Generic, Optional, Sequence, TypeVar, Union, cast
+from typing import Any, Callable, Generic, Optional, Sequence, TypeVar, Union
 
 import numpy as np
 import torch
@@ -120,7 +120,6 @@ class MLP(nn.Module):
         start_idx = self.layers.index(start)
         end_idx = self.layers.index(end)
         n_layers = end_idx - start_idx + 1
-        print(output)
         mlp = MLP(
             n_layers,
             start.in_features,
@@ -137,9 +136,10 @@ class MLP(nn.Module):
         output: Optional[slice] = None,
         non_negative: bool = False,
         n_tries: int = 1000,
-        seed: int = 0,
+        seed: Optional[int] = None,
     ) -> torch.Tensor:
-        torch.manual_seed(seed)
+        if seed is not None:
+            torch.manual_seed(seed)
         if output is None:
             output = self.output_selection
 
@@ -490,7 +490,30 @@ class RootFinder(abc.ABC):
         """
 
 
-LOCAL_SEGMENTS_CACHE_KEY = tuple[int, int, tuple[int, int, int]]
+@dataclasses.dataclass(frozen=True)
+class LocalSegmentsCacheKey:
+    input_layer: int
+    lower_rel_layer: int
+    upper_rel_layer: int
+    grad_hash: int
+    hash_decimals: int
+
+    @staticmethod
+    def from_rel_fn(
+        rel_fn: RelevanceFn, grad_hash: int, hash_decimals: int
+    ) -> LocalSegmentsCacheKey:
+        mlp = rel_fn.mlp
+
+        def get_index(layer: NETWORK_LAYER) -> int:
+            return mlp.get_layer_index(mlp.resolve_marker(layer))
+
+        return LocalSegmentsCacheKey(
+            get_index(rel_fn.get_input_layer()),
+            get_index(rel_fn.get_lower_rel_layer()),
+            get_index(rel_fn.get_upper_rel_layer()),
+            grad_hash,
+            hash_decimals,
+        )
 
 
 @dataclasses.dataclass
@@ -499,7 +522,7 @@ class SampleRoots(RootFinder):
 
     use_cache: bool = True
     cache: dict[
-        LOCAL_SEGMENTS_CACHE_KEY,
+        LocalSegmentsCacheKey,
         list[RootPoint],
     ] = dataclasses.field(default_factory=dict, init=False, hash=False)
     cache_hits: int = dataclasses.field(default=0, init=False, hash=False)
@@ -507,41 +530,36 @@ class SampleRoots(RootFinder):
 
     use_candidates_cache: bool = False
     candidates_cache: dict[
-        LOCAL_SEGMENTS_CACHE_KEY,
+        LocalSegmentsCacheKey,
         torch.Tensor,
     ] = dataclasses.field(default_factory=dict, init=False, hash=False)
+    cache_grad_hash_decimals: int = 5
 
     def __post_init__(self):
         pass
+
+    def clear_caches(self) -> None:
+        self.candidates_cache.clear()
+        self.cache.clear()
 
     def get_cache_key(
         self,
         for_input_to_layer: NETWORK_LAYER,
         input: torch.Tensor,
         relevance_fn: RelevanceFn,
-    ) -> Optional[LOCAL_SEGMENTS_CACHE_KEY]:
+    ) -> Optional[LocalSegmentsCacheKey]:
         assert not isinstance(for_input_to_layer, (NetworkOutput, NetworkInput))
 
         if not self.use_cache:
             return None
         grad = self.model.compute_input_grad(input, for_input_to_layer)
-        grad_query = torch.round(grad, decimals=4)
+        grad_query = torch.round(grad, decimals=self.cache_grad_hash_decimals)
         grad_bytes = grad_query.detach().cpu().numpy().tobytes()
         grad_hash = hash(grad_bytes)
-        layer_index = self.model.get_layer_index(for_input_to_layer)
-        rel_layers = (
-            relevance_fn.get_input_layer(),
-            relevance_fn.get_lower_rel_layer(),
-            relevance_fn.get_upper_rel_layer(),
+
+        return LocalSegmentsCacheKey.from_rel_fn(
+            relevance_fn, grad_hash, self.cache_grad_hash_decimals
         )
-        rel_layer_index = cast(
-            tuple[int, int, int],
-            tuple(
-                self.model.get_layer_index(self.model.resolve_marker(layer))
-                for layer in rel_layers
-            ),
-        )
-        return layer_index, grad_hash, rel_layer_index
 
     @abc.abstractmethod
     def sample_candidates(
@@ -661,7 +679,7 @@ class LinearDTDRootFinder(RootFinder):
         rel = relevance_fn(input)
         relevance = rel.relevance
 
-        rule = getattr(for_input_to_layer, "rule", None) or self.rule
+        rule = getattr(for_input_to_layer, "dtd_rule", None) or self.rule
         if is_layer_rule(rule):
             roots: list[Optional[torch.Tensor]] = [
                 compute_root_for_layer(
@@ -982,6 +1000,52 @@ class FullBackwardRel(Relevance):
 
         return self_rel + upper_rel
 
+    def _collect_info(self, callgraph: list[str]) -> list[dict[str, Any]]:
+        mlp = self.computed_with_fn.mlp
+        rel_input = self.computed_with_fn.get_input_layer()
+        if isinstance(rel_input, LinearReLU):
+            layer_name = mlp.get_layer_name(rel_input)
+        else:
+            layer_name = "output"
+
+        callgraph_w_layer = callgraph + [layer_name]
+        data = []
+
+        if isinstance(self, FullBackwardRel):
+            for root, r, rel_unresolved, rel_decomposed in zip(
+                self.roots,
+                self.relevance_upper_layers,
+                self.unresolved_relevance,
+                self.roots_relevance,
+            ):
+                j = root.explained_neuron
+                callgraph_w_root = callgraph_w_layer + [f"root_{j}"]
+
+                assert root.relevance is not None
+
+                root_logit = mlp(root.root, first=root.layer)
+                input_logit = mlp(root.input, first=root.layer)
+                data.append(
+                    {
+                        "layer": layer_name,
+                        "unresolved_relevance": rel_unresolved.detach().numpy(),
+                        "relevance": rel_decomposed.detach().numpy(),
+                        "callgraph": callgraph_w_root,
+                        "root": root.root.detach().numpy(),
+                        "input": root.input.detach().numpy(),
+                        "root_logit": root_logit.detach().item(),
+                        "input_logit": input_logit.detach().item(),
+                        "explained_neuron": root.explained_neuron,
+                        "root_relevance": root.relevance.detach().numpy(),
+                    }
+                )
+                if isinstance(r, FullBackwardRel):
+                    data.extend(r._collect_info(callgraph_w_root))
+        return data
+
+    def collect_info(self):
+        return self._collect_info([])
+
 
 @dataclasses.dataclass(frozen=True)
 class StabilizeGradient:
@@ -1198,6 +1262,8 @@ class TrainFreeFn(RelevanceFixedLayersFn[TrainFreeRel]):
     root_finder: RootFinder
     check_nans: bool = True
     check_consistent: bool = True
+    # whether to omit the ReLU activation, when computing the gradient
+    omit_relu: bool = True
     lower_rel_layer: LinearReLU = dataclasses.field(init=False)
 
     @staticmethod
@@ -1263,8 +1329,11 @@ class TrainFreeFn(RelevanceFixedLayersFn[TrainFreeRel]):
         for root in roots:
             root.root.requires_grad_(True)
 
-            # To ensure gradient is not zero, only derive linear layer
-            output = input_layer.linear(root.root)
+            if self.omit_relu:
+                # To ensure gradient is not zero, only derive linear layer
+                output = input_layer.linear(root.root)
+            else:
+                output = input_layer(root.root)
 
             output_sel = ensure_2d(output[:, root.explained_neuron])
 
@@ -1279,7 +1348,7 @@ class TrainFreeFn(RelevanceFixedLayersFn[TrainFreeRel]):
 
             if self.check_consistent:
                 assert torch.allclose(
-                    rel_j.sum(), rel_from[0, root.explained_neuron]
+                    rel_j.sum(), rel_from[0, root.explained_neuron], atol=1e-7
                 )
             # TODO: check nans
 

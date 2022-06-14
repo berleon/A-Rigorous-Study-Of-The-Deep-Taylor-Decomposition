@@ -319,10 +319,6 @@ def test_dtd_train_free_matches_captum():
 
     torch.manual_seed(1)
 
-    x = mlp.get_input_with_output_greater(
-        0.25, explained_output, non_negative=True
-    )
-
     root_finder = dtd.LinearDTDRootFinder(
         mlp,
         explained_output.start,
@@ -340,19 +336,24 @@ def test_dtd_train_free_matches_captum():
     )
 
     mlp_output = mlp.slice(output=explained_output)
-    logit = mlp_output(x)
 
-    rel_result = cast(dtd.TrainFreeRel, rel_fns[-1](x))
+    for _ in range(100):
+        x = mlp.get_input_with_output_greater(
+            0.25, explained_output, non_negative=True
+        )
+        logit = mlp_output(x)
 
-    rel_result.relevance
-    lrp.set_lrp_rules(mlp, set_bias_to_zero=True)
-    lrp_attr = captum.attr.LRP(mlp)
-    saliency = lrp_attr.attribute(x, target=explained_output.start)
+        rel_result = cast(dtd.TrainFreeRel, rel_fns[-1](x))
 
-    assert torch.allclose(saliency.sum(), logit)
+        rel_result.relevance
+        lrp.set_lrp_rules(mlp, set_bias_to_zero=True)
+        lrp_attr = captum.attr.LRP(mlp)
+        saliency = lrp_attr.attribute(x, target=explained_output.start)
 
-    assert torch.allclose(
-        rel_result.relevance,
-        saliency,
-        atol=1e-5,
-    )
+        assert torch.allclose(saliency.sum(), logit)
+
+        assert torch.allclose(
+            rel_result.relevance,
+            saliency,
+            atol=1e-8,
+        )
