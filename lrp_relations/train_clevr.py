@@ -241,6 +241,9 @@ def run_training(
 class TrainedModel:
     checkpoints: list[Checkpoint]
 
+    def get_best_checkpoint(self) -> Checkpoint:
+        return max(self.checkpoints, key=lambda x: x.accuracy)
+
 
 class Train(savethat.Node[TrainArgs, TrainedModel]):
     def _run(self):

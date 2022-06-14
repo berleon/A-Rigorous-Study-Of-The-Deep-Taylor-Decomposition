@@ -63,3 +63,32 @@ def sha256sum(filename: Path) -> str:
 
 def to_np(x: torch.Tensor) -> np.ndarray:
     return x.detach().cpu().numpy()
+
+
+def insert_newlines(string, every=64):
+    lines = []
+    words = string.split(" ")
+    line_length = 0
+    current_line = []
+    for word in words:
+        if line_length + len(word) + 1 > every:
+            lines.append(" ".join(current_line))
+            line_length = 0
+            current_line = []
+
+        current_line.append(word)
+        line_length += len(word) + 1
+    if current_line:
+        lines.append(" ".join(current_line))
+    return "\n".join(lines)
+
+
+def randperm_without_fix_point(n: int) -> torch.Tensor:
+    """
+    Generate a random permutation of the integers 0,...,n-1 such that
+    the permutation has no fixed point, e.g. i_10 = 10.
+    """
+    perm = torch.randperm(n)
+    while (perm == torch.arange(n)).any():
+        perm = torch.randperm(n)
+    return perm

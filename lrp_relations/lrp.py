@@ -1,13 +1,15 @@
 """Implementation of the LRP_a1_b0 rules for the Relation Network."""
 
 from copy import deepcopy
-from typing import Callable, Union, cast
+from typing import Callable, Optional, Union, cast
 
 import captum.attr
+import numpy as np
 import torch
 from captum.attr._utils import lrp_rules
 from torch import nn
 
+from lrp_relations import utils
 from relation_network.model import RelationNetworks
 
 
@@ -130,11 +132,16 @@ class LRPViewOfRelationNetwork(nn.Module):
         question: torch.Tensor,
         q_len: int,
         target: Union[int, torch.Tensor],
-        randomize_questions: bool = False,
+        question_permutation: Optional[torch.Tensor] = None,
         normalize: bool = True,
     ) -> torch.Tensor:
         return self.get_lrp_saliency_and_logits(
-            image, question, q_len, target, randomize_questions, normalize
+            image,
+            question,
+            q_len,
+            target,
+            question_permutation,
+            normalize,
         )[0]
 
     def get_lrp_saliency_and_logits(
@@ -143,21 +150,22 @@ class LRPViewOfRelationNetwork(nn.Module):
         question: torch.Tensor,
         q_len: int,
         target: Union[int, torch.Tensor],
-        randomize_questions: bool = False,
+        question_permutation: Optional[torch.Tensor] = None,
         normalize: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         set_lrp_rules(self)
         lrp_attr = captum.attr.LRP(self)
 
         if isinstance(target, int):
-            target = torch.full((image.size(0),), target, dtype=torch.long)
+            target = image.new_full((image.size(0),), target, dtype=torch.long)
 
         question_embed = self.original_relnet.lstm_embed(question, q_len)
 
-        if randomize_questions:
-            index = torch.randperm(question_embed.shape[1])
+        if question_permutation is not None:
             shape = question_embed.shape
-            question_embed = question_embed[:, index].contiguous()
+            question_embed = question_embed[
+                :, question_permutation
+            ].contiguous()
             assert question_embed.shape == shape
 
         saliency = lrp_attr.attribute(
@@ -187,3 +195,21 @@ def set_lrp_rules(lrp_relnet: nn.Module, set_bias_to_zero: bool = True) -> None:
             module.rule = ConcatRule(module.dim)
         else:
             module.rule = lrp_rules.IdentityRule()
+
+
+def normalize_saliency(
+    saliency: torch.Tensor,
+    clip_percentile_max: Optional[float] = 99.5,
+    clip_percentile_min: Optional[float] = 0.5,
+    retain_zero: bool = False,
+    abs: bool = True,
+) -> torch.Tensor:
+    assert not retain_zero
+    if abs:
+        saliency = saliency.abs()
+    saliency_np = utils.to_np(saliency)
+    vmin, vmax = np.percentile(
+        saliency_np, [clip_percentile_min or 0, clip_percentile_max or 100]
+    )
+    saliency = saliency.clamp(vmin, vmax)
+    return (saliency - vmin) / (vmax - vmin)

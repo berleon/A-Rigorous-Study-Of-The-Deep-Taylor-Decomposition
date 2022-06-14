@@ -104,27 +104,45 @@ class CLEVR_XAI(torch_data.Dataset):
         with open(questions_json, "r") as f:
             self.questions_json = json.load(f)["questions"]
 
+    def answer_dict(self) -> dict[str, str]:
+        if hasattr(self, "answer_class"):
+            return self.answer_class
+        root = utils.clevr_path()
+        with open(f"{root}/dic.pkl", "rb") as f:
+            self.dic = pickle.load(f)
+        self.answer_class = {v: k for k, v in self.dic["answer_dic"].items()}
+        return self.answer_class
+
     def get_question_and_answer(self, index: int) -> tuple[str, str]:
         question_idx, _ = self.gt_filenames[index]
         question = self.questions_json[question_idx]["question"]
         answer = self.questions_json[question_idx]["answer"]
         return question, answer
 
+    def get_image(
+        self, index: int, preprocessed: bool, resize: bool
+    ) -> Image.Image:
+        question_idx, _ = self.gt_filenames[index]
+        imgfile, _, _, _ = self.data[question_idx]
+        img_path = {
+            False: self.root / "images" / imgfile,
+            True: self.root / "images_preprocessed" / imgfile,
+        }[preprocessed]
+        img = Image.open(img_path).convert("RGB")
+
+        if resize:
+            img = rel_data.resize(img)
+        return img
+
     def __getitem__(
         self, index: int
     ) -> tuple[torch.Tensor, np.ndarray, int, int, int]:
 
-        question_idx, gt_path = self.gt_filenames[index]
-        imgfile, question, answer, _ = self.data[question_idx]
+        question_idx, _ = self.gt_filenames[index]
+        _, question, answer, _ = self.data[question_idx]
 
-        img_path = {
-            False: self.root / "images" / imgfile,
-            True: self.root / "images_preprocessed" / imgfile,
-        }[self.use_preprocessed]
-
-        img = Image.open(img_path).convert("RGB")
-        if not self.use_preprocessed:
-            img = rel_data.resize(img)
+        resize = not self.use_preprocessed
+        img = self.get_image(index, self.use_preprocessed, resize)
 
         # always use eval transform
         img_tensor = cast(torch.Tensor, rel_data.eval_transform(img))
