@@ -21,6 +21,8 @@ while true; do
       --copy-links \
       --delete \
       --exclude '*.egg-info' \
+      --exclude '.tox*' \
+      --exclude '/site/' \
       --exclude '**pycache**' \
       --exclude '/.mypy_cache/' \
       --exclude '/.pytest_cache/' \
