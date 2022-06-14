@@ -104,7 +104,7 @@ class CLEVR_XAI(torch_data.Dataset):
         with open(questions_json, "r") as f:
             self.questions_json = json.load(f)["questions"]
 
-    def answer_dict(self) -> dict[str, str]:
+    def answer_dict(self) -> dict[int, str]:
         if hasattr(self, "answer_class"):
             return self.answer_class
         root = utils.clevr_path()

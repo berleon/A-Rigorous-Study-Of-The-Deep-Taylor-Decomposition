@@ -3,6 +3,7 @@ import json
 import pickle
 from collections import Counter
 from pathlib import Path
+from typing import Optional
 
 import savethat
 import torch
@@ -243,6 +244,11 @@ class TrainedModel:
 
     def get_best_checkpoint(self) -> Checkpoint:
         return max(self.checkpoints, key=lambda x: x.accuracy)
+
+    def get_checkpoint(self, path: Optional[str]) -> Checkpoint:
+        if path is None:
+            return self.get_best_checkpoint()
+        return next(c for c in self.checkpoints if c.path == path)
 
 
 class Train(savethat.Node[TrainArgs, TrainedModel]):
