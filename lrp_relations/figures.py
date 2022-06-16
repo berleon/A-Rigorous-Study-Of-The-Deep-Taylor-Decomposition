@@ -211,9 +211,10 @@ def savefig_pgf(
     display: bool = False,
     iframe_size: tuple[int, int] = (800, 400),
     pdf: bool = True,
+    pad_inches: float = 0.01,
     **kwargs: Any,
 ):
-    figure.savefig(fname, bbox_inches="tight", pad_inches=0.03, **kwargs)
+    figure.savefig(fname, bbox_inches="tight", pad_inches=pad_inches, **kwargs)
     if pdf or display:
         pdf_fname, _ = os.path.splitext(fname)
         pdf_fname += ".pdf"
