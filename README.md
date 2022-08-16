@@ -10,17 +10,13 @@
 
 Apply the sanity checks to relation networks
 
+## Pointers to the Code:
 
-* Documentation: <https://berleon.github.io/sanity_checks_for_relation_networks>
-* GitHub: <https://github.com/berleon/sanity_checks_for_relation_networks>
-* PyPI: <https://pypi.org/project/sanity_checks_for_relation_networks/>
-* Free software: MIT
+* Source code of the sanity checks can be found in the following files: `lrp_relations/sanity_checks.py`. For preprocessing, see
+`lrp_relations/preprocessing_clevr.py` and `lrp_relations/preprocessing_clevr_xai.py`.
+* Source code of the experiment with the simple neural network can be found in `lrp_relations/notebooks/dtd_local_linear_roots.ipynb`.
 
 
-## Features
+## Dependencies
 
-* TODO
-
-## Credits
-
-This package was created with [Cookiecutter](https://github.com/audreyr/cookiecutter) and the [waynerv/cookiecutter-pypackage](https://github.com/waynerv/cookiecutter-pypackage) project template.
+Make sure you installed the packages in the subfolders: `savethat`, `relation_network`, `clevr-xai`. And then run `poetry install`.
