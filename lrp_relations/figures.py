@@ -101,6 +101,7 @@ def latexify(
     linewidth_thin: float = 0.33,
     linewidth: float = 0.5,
     n_colors: Optional[int] = None,
+    **style_kwargs: Any,
 ):
     style = latex_style(
         dark_gray=dark_gray,
@@ -110,6 +111,7 @@ def latexify(
         linewidth_thin=linewidth_thin,
         linewidth=linewidth,
     )
+    style.update(style_kwargs)
 
     with mpl_style(style), sns.color_palette(
         "colorblind", n_colors=n_colors  # type: ignore
