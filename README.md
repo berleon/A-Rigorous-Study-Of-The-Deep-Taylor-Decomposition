@@ -15,4 +15,8 @@ Decomposition"](https://openreview.net/forum?id=Y4mgmw9OgV)
 
 ## Install
 
-Make sure you installed the packages in the subfolders: `relation_network`, `clevr-xai`. And then run `poetry install`.
+Make sure you init the github submodules and install packages in the subfolders:
+```
+pip install ./relation_network ./clevr-xai
+```
+And then run `poetry install`.
