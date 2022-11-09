@@ -1,26 +1,18 @@
-# sanity_checks_for_relation_networks
+# A Rigorous Study Of The Deep Taylor Decomposition
 
 
-[![pypi](https://img.shields.io/pypi/v/sanity_checks_for_relation_networks.svg)](https://pypi.org/project/sanity_checks_for_relation_networks/)
-[![python](https://img.shields.io/pypi/pyversions/sanity_checks_for_relation_networks.svg)](https://pypi.org/project/sanity_checks_for_relation_networks/)
 [![Build Status](https://github.com/berleon/sanity_checks_for_relation_networks/actions/workflows/dev.yml/badge.svg)](https://github.com/berleon/sanity_checks_for_relation_networks/actions/workflows/dev.yml)
-[![codecov](https://codecov.io/gh/berleon/sanity_checks_for_relation_networks/branch/main/graphs/badge.svg)](https://codecov.io/github/berleon/sanity_checks_for_relation_networks)
+
+This is the code for the publications ["A Rigorous Study Of The Deep Taylor
+Decomposition"](https://openreview.net/forum?id=Y4mgmw9OgV)
+
+## Pointers to the Code:
+
+* Source code of the sanity checks can be found in the following files: `lrp_relations/sanity_checks.py`. For preprocessing, see
+`lrp_relations/preprocessing_clevr.py` and `lrp_relations/preprocessing_clevr_xai.py`.
+* Source code of the experiment with the simple neural network can be found in `lrp_relations/notebooks/dtd_local_linear_roots.ipynb`.
 
 
+## Install
 
-Apply the sanity checks to relation networks
-
-
-* Documentation: <https://berleon.github.io/sanity_checks_for_relation_networks>
-* GitHub: <https://github.com/berleon/sanity_checks_for_relation_networks>
-* PyPI: <https://pypi.org/project/sanity_checks_for_relation_networks/>
-* Free software: MIT
-
-
-## Features
-
-* TODO
-
-## Credits
-
-This package was created with [Cookiecutter](https://github.com/audreyr/cookiecutter) and the [waynerv/cookiecutter-pypackage](https://github.com/waynerv/cookiecutter-pypackage) project template.
+Make sure you installed the packages in the subfolders: `relation_network`, `clevr-xai`. And then run `poetry install`.

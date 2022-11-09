@@ -23,12 +23,6 @@ class LinearReLU(nn.Module):
         self.linear = nn.Linear(in_features, out_features)
         self.relu = nn.ReLU()
 
-        def clamp_biases(module: nn.Module) -> None:
-            if isinstance(module, nn.Linear):
-                module.bias.data.clamp_(max=0)
-
-        self.apply(clamp_biases)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.relu(self.linear(x))
 
@@ -324,12 +318,25 @@ class GammaRule(Rule):
         super().__init__("gamma")
 
 
+def get_latex_rule_name(rule: RULE) -> str:
+    latex_rule_names = {
+        "w2": "$w^2$",
+        "z+": "$z^+$",
+        "0": "LRP$_{0}$",
+    }
+    if rule.name == "gamma":
+        return f"$\\gamma={rule.gamma}$"
+    else:
+        return latex_rule_names[rule.name]
+
+
 class rules:
     pinv = Rule("pinv")
     z_plus = Rule("z+")
     w2 = Rule("w2")
     x = Rule("x")
     zB = Rule("zB")
+    zero = Rule("0")
 
     @staticmethod
     def gamma(gamma: float) -> GammaRule:

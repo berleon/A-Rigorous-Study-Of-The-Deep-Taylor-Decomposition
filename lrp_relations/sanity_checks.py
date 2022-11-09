@@ -17,9 +17,11 @@ $ python -m sanity_checks_for_relation_networks run \
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import itertools
 import pickle
+import random
 from pathlib import Path
 from typing import Callable, Optional, cast
 
@@ -29,6 +31,7 @@ import torch
 from tqdm import tqdm
 
 from lrp_relations import data, lrp, train_clevr, utils
+from relation_network import dataset as rel_dataset
 from relation_network.model import RelationNetworks
 
 from lrp_relations import enable_deterministic  # noqa isort:skip
@@ -134,6 +137,29 @@ class SanityChecksForRelationNetworksResults:
         )
 
 
+def random_answer_same_category_fn(
+    dataset: data.CLEVR_XAI,
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    category_inverse = collections.defaultdict(set)
+    for answer_name, category in rel_dataset.category.items():
+        category_inverse[category].add(answer_name)
+
+    int_to_answer = dataset.answer_dict()
+    answer_to_int = {v: k for k, v in int_to_answer.items()}
+
+    def get_random_answer(answers: torch.Tensor) -> torch.Tensor:
+        rand_answers = []
+        for i in answers.tolist():
+            answer = int_to_answer[i]
+            category = rel_dataset.category[answer]
+            category_items = category_inverse[category] - set([answer])
+            rand_answer = random.choice(list(category_items))
+            rand_answers.append(answer_to_int[rand_answer])
+        return torch.tensor(rand_answers, device=answers.device)
+
+    return get_random_answer
+
+
 class SanityChecksForRelationNetworks(
     savethat.Node[
         SanityChecksForRelationNetworksArgs,
@@ -214,6 +240,10 @@ class SanityChecksForRelationNetworks(
         lrp_relnet = lrp.LRPViewOfRelationNetwork(relnet)
         lrp_relnet.to(device)
 
+        get_random_answers = random_answer_same_category_fn(
+            clevr_xai.dataset  # type: ignore
+        )
+
         for i, (image, question, q_len, answer, dataset_index) in enumerate(
             pbar
         ):
@@ -254,9 +284,7 @@ class SanityChecksForRelationNetworks(
                 )
 
             saliency_0.append(get_lrp_saliency(answer))
-            saliency_1.append(
-                get_lrp_saliency(answer + 1 % len(dic["answer_dic"]))
-            )
+            saliency_1.append(get_lrp_saliency(get_random_answers(answer)))
             saliency_rand_questions.append(
                 get_lrp_saliency(answer, randomize_questions=True)
             )
