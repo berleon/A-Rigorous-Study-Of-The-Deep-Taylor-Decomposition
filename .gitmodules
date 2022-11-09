@@ -1,3 +1,6 @@
 [submodule "relation_network"]
 	path = relation_network
 	url = git@github.com:berleon/relation-networks-pytorch.git
+[submodule "clevr-xai"]
+	path = clevr-xai
+	url = https://github.com/berleon/clevr-xai
