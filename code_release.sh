@@ -59,3 +59,6 @@ find . -name '*.bak' | xargs rm
 
 rm -rf .git
 rm -rf .tox
+
+cd ..
+zip -r dtd_tmlr_code.zip dtd_tmlr
